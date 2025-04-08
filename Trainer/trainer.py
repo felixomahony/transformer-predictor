@@ -21,6 +21,9 @@ from torchvision.datasets.cifar import CIFAR10
 from torchvision.datasets.stl10 import STL10
 from torchvision.datasets.coco import CocoCaptions
 from torchvision.datasets import ImageFolder
+from torch.utils.data import Dataset
+
+from Data_Modules.gs_dataset import GS_Dataset
 
 
 def custom_lamda(x):
@@ -28,135 +31,61 @@ def custom_lamda(x):
 
 
 class Trainer(object):
-    """ Abstract class for each trainer """
+    """Abstract class for each trainer"""
 
     vit = None
     optim = None
 
     def __init__(self, args):
-        """ Initialization of the Trainer """
+        """Initialization of the Trainer"""
         self.args = args
-        self.writer = None if args.writer_log == "" else SummaryWriter(log_dir=args.writer_log)  # Tensorboard writer
+        self.writer = (
+            None if args.writer_log == "" else SummaryWriter(log_dir=args.writer_log)
+        )  # Tensorboard writer
 
-    def get_data(self):
-        """ class to load data """
-        if self.args.data == "mnist":
-            data_train = MNIST('./Dataset/mnist', download=False,
-                               transform=transforms.Compose([transforms.Resize(self.args.img_size),
-                                                             transforms.ToTensor(),
-                                                             ]))
-        elif self.args.data == "cifar10":
-            data_train = CIFAR10('./Dataset/CIFAR10/', train=True, download=True,
-                                 transform=transforms.Compose([
-                                           transforms.Resize(self.args.img_size),
-                                           transforms.RandomHorizontalFlip(),
-                                           transforms.ToTensor(),
-                                           transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-                                 ]))
-            data_test = CIFAR10('./Dataset/CIFAR10/', train=False, download=False,
-                                transform=transforms.Compose([
-                                    transforms.Resize(self.args.img_size),
-                                    transforms.ToTensor(),
-                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-                                ]))
+    def get_data(self, **kwargs):
+        """class to load data"""
+        data_train = GS_Dataset(
+            self.args.data_folder,
+            codebook_size=self.args.codebook_size,
+            train=True,
+            **kwargs
+        )
+        data_test = GS_Dataset(
+            self.args.data_folder,
+            codebook_size=self.args.codebook_size,
+            train=False,
+            **kwargs
+        )
 
-        elif self.args.data == "stl10":
-            data_train = STL10('./Dataset/stl10', split="train+unlabeled",
-                               transform=transforms.Compose([
-                                   transforms.Resize(self.args.img_size),
-                                   transforms.RandomHorizontalFlip(),
-                                   transforms.ToTensor(),
-                                   transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-                               ]))
-            data_test = STL10('./Dataset/stl10', split="test",
-                              transform=transforms.Compose([
-                                  transforms.Resize(self.args.img_size),
-                                  transforms.ToTensor(),
-                                  transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-                              ]))
+        train_sampler = (
+            DistributedSampler(data_train, shuffle=True)
+            if self.args.is_multi_gpus
+            else None
+        )
+        test_sampler = (
+            DistributedSampler(data_test, shuffle=True)
+            if self.args.is_multi_gpus
+            else None
+        )
 
-        elif self.args.data == "imagenet":
-            # '/Dataset/ImageNet/train'
-            t_train = transforms.Compose([transforms.Resize(self.args.img_size),
-                                          transforms.RandomCrop((self.args.img_size, self.args.img_size)),
-                                          transforms.RandomHorizontalFlip(),
-                                          transforms.ToTensor(),
-                                          # transforms.Normalize(
-                                          #    mean=[0.485, 0.456, 0.406],
-                                          #    std=[0.229, 0.224, 0.225])
-                                          ])
-            t_test = transforms.Compose([transforms.Resize(self.args.img_size),
-                                         transforms.CenterCrop((self.args.img_size, self.args.img_size)),
-                                         transforms.ToTensor(),
-                                         # transforms.Normalize(
-                                         #     mean=[0.485, 0.456, 0.406],
-                                         #     std=[0.229, 0.224, 0.225])
-                                         ])
-
-            try:
-                data_train = ImageFolder(os.path.join(self.args.data_folder, "train"), transform=t_train)
-                data_test = ImageFolder(os.path.join(self.args.data_folder, "val"), transform=t_test)
-            except:
-                data_train = ImageNetKaggle(self.args.data_folder, "train", transform=t_train)
-                data_test = ImageNetKaggle(self.args.data_folder, "val", transform=t_test)
-
-        elif self.args.data == "mscoco":
-            data_train = CocoCaptions(root='/datasets_master/COCO/images/train2017/',
-                                      annFile='/datasets_master/COCO/annotations/captions_train2017.json',
-                                      transform=transforms.Compose([
-                                                transforms.Resize(self.args.img_size),
-                                                transforms.RandomCrop((self.args.img_size, self.args.img_size)),
-                                                transforms.RandomHorizontalFlip(),
-                                                transforms.ToTensor(),
-                                                transforms.Normalize(
-                                                        mean=[0.485, 0.456, 0.406],
-                                                        std=[0.229, 0.224, 0.225])
-
-                                      ]),
-                                      target_transform=custom_lamda)
-            data_test = CocoCaptions(root='/datasets_master/COCO/images/val2017/',
-                                     annFile='/datasets_master/COCO/annotations/captions_val2017.json',
-                                     transform=transforms.Compose([
-                                               transforms.Resize(self.args.img_size),
-                                               transforms.CenterCrop((self.args.img_size, self.args.img_size)),
-                                               transforms.ToTensor(),
-                                               transforms.Normalize(
-                                                   mean=[0.485, 0.456, 0.406],
-                                                   std=[0.229, 0.224, 0.225])
-                                     ]),
-                                     target_transform=custom_lamda)
-
-        elif self.args.data == "cc3m":
-            def preprocess(sample):
-                img, annotation = sample
-
-                caption = annotation['caption']
-                t_train = transforms.Compose([transforms.ToTensor(),
-                                              transforms.Resize(self.args.img_size),
-                                              transforms.RandomCrop((self.args.img_size, self.args.img_size)),
-                                              ])
-                img = t_train(img)
-                img = (2 * img) - 1
-                return img, caption[:75]
-
-            dataset = wds.WebDataset(None, resampled=True)
-            dataset = dataset.shuffle(1000).decode("rgb").to_tuple("jpg", "json").map(preprocess).batched(self.args.bsize).with_epoch(10000)
-            train_loader = wds.WebLoader(dataset, batch_size=None, shuffle=False, pin_memory=True, num_workers=self.args.num_workers)
-            train_loader = train_loader.unbatched().shuffle(1000).batched(self.args.bsize)
-
-            return train_loader, None
-
-        train_sampler = DistributedSampler(data_train, shuffle=True) if self.args.is_multi_gpus else None
-        test_sampler = DistributedSampler(data_test, shuffle=True) if self.args.is_multi_gpus else None
-
-        train_loader = DataLoader(data_train, batch_size=self.args.bsize,
-                                  shuffle=False if self.args.is_multi_gpus else True,
-                                  num_workers=self.args.num_workers, pin_memory=True,
-                                  drop_last=True, sampler=train_sampler)
-        test_loader = DataLoader(data_test, batch_size=self.args.bsize,
-                                 shuffle=False if self.args.is_multi_gpus else True,
-                                 num_workers=self.args.num_workers, pin_memory=True,
-                                 sampler=test_sampler)
+        train_loader = DataLoader(
+            data_train,
+            batch_size=self.args.bsize,
+            shuffle=False if self.args.is_multi_gpus else True,
+            num_workers=self.args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            sampler=train_sampler,
+        )
+        test_loader = DataLoader(
+            data_test,
+            batch_size=self.args.bsize,
+            shuffle=False if self.args.is_multi_gpus else True,
+            num_workers=self.args.num_workers,
+            pin_memory=True,
+            sampler=test_sampler,
+        )
 
         return train_loader, test_loader
 
@@ -164,23 +93,25 @@ class Trainer(object):
         pass
 
     def log_add_img(self, names, img, iter):
-        """ Add an image in tensorboard"""
+        """Add an image in tensorboard"""
         if self.writer is None:
             return
         self.writer.add_image(tag=names, img_tensor=img, global_step=iter)
 
     def log_add_scalar(self, names, scalar, iter):
-        """ Add scalar value in tensorboard """
+        """Add scalar value in tensorboard"""
         if self.writer is None:
             return
         if isinstance(scalar, dict):
-            self.writer.add_scalars(main_tag=names, tag_scalar_dict=scalar, global_step=iter)
+            self.writer.add_scalars(
+                main_tag=names, tag_scalar_dict=scalar, global_step=iter
+            )
         else:
             self.writer.add_scalar(tag=names, scalar_value=scalar, global_step=iter)
 
     @staticmethod
     def get_optim(net, lr, mode="AdamW", **kwargs):
-        """ Get the optimizer Adam or Adam with weight decay """
+        """Get the optimizer Adam or Adam with weight decay"""
         if isinstance(net, list):
             params = []
             for n in net:
@@ -196,7 +127,7 @@ class Trainer(object):
 
     @staticmethod
     def get_loss(mode="l1", **kwargs):
-        """ return the loss """
+        """return the loss"""
         if mode == "l1":
             return nn.L1Loss()
         elif mode == "l2":
@@ -220,7 +151,7 @@ class Trainer(object):
 
     @staticmethod
     def all_gather(obj, gpus, reduce="mean"):
-        """ Gather the value obj from all GPUs and return the mean or the sum """
+        """Gather the value obj from all GPUs and return the mean or the sum"""
         tensor_list = [torch.zeros(1) for _ in range(gpus)]
         dist.all_gather_object(tensor_list, obj)
         obj = torch.FloatTensor(tensor_list)
@@ -236,20 +167,28 @@ class Trainer(object):
         return obj
 
     def save_network(self, model, path, iter=None, optimizer=None, global_epoch=None):
-        """ Save the state of the model, including the iteration,
-            the optimizer state and the current epoch"""
+        """Save the state of the model, including the iteration,
+        the optimizer state and the current epoch"""
         if self.args.is_multi_gpus:
-            torch.save({'iter': iter,
-                        'global_epoch': global_epoch,
-                        'model_state_dict': model.module.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict()},
-                       path)
+            torch.save(
+                {
+                    "iter": iter,
+                    "global_epoch": global_epoch,
+                    "model_state_dict": model.module.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                path,
+            )
         else:
-            torch.save({'iter': iter,
-                        'global_epoch': global_epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict()},
-                       path)
+            torch.save(
+                {
+                    "iter": iter,
+                    "global_epoch": global_epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                path,
+            )
 
 
 class ImageNetKaggle(Dataset):
