@@ -1,1 +1,8 @@
+__pycache__/
+pretrained_maskgit/
+Dataset/
+a.png
+colab_demo.ipynb
+.vscode/
 
+*.pth
