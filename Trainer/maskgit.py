@@ -18,7 +18,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from Trainer.trainer import Trainer
 from Network.transformer import MaskTransformer
 
-from Network.Taming.models.vqgan import VQModel
 
 
 class MaskGIT(Trainer):
@@ -53,18 +52,11 @@ class MaskGIT(Trainer):
         if self.args.codebook_path != "":
             self.vit.load_codebook(self.args.codebook_path)
         self.criterion = self.get_loss(
-            "cross_entropy", label_smoothing=0.0
+            "cross_entropy"
         )  # Get cross entropy loss
         self.optim = self.get_optim(
             self.vit, self.args.lr, betas=(0.9, 0.96)
         )  # Get Adam Optimizer with weight decay
-
-
-        # Initialize evaluation object if testing
-        if self.args.test_only:
-            from Metrics.sample_and_eval import SampleAndEval
-
-            self.sae = SampleAndEval(device=self.args.device, num_images=50_000)
 
     def get_network(self, archi, hidden_dim=768, **kwargs):
         """return the network, load checkpoint if self.args.resume == True
@@ -103,21 +95,6 @@ class MaskGIT(Trainer):
             if self.args.is_multi_gpus:  # put model on multi GPUs if available
                 model = DDP(model, device_ids=[self.args.device])
 
-        elif archi == "autoencoder":
-            # Load config
-            config = OmegaConf.load(self.args.vqgan_folder + "model.yaml")
-            model = VQModel(**config.model.params)
-            checkpoint = torch.load(
-                self.args.vqgan_folder + "last.ckpt", map_location="cpu"
-            )["state_dict"]
-            # Load network
-            model.load_state_dict(checkpoint, strict=False)
-            model = model.eval()
-            model = model.to(self.args.device)
-
-            if self.args.is_multi_gpus:  # put model on multi GPUs if available
-                model = DDP(model, device_ids=[self.args.device])
-                model = model.module
         else:
             model = None
 
@@ -208,14 +185,10 @@ class MaskGIT(Trainer):
         )
         n = len(self.train_data)
         # Start training for 1 epoch
-        for x, y in bar:
+        for x in bar:
             x = x.to(self.args.device)
-            y = y.to(self.args.device)
 
-            # Drop xx% of the condition for cfg
-            drop_label = torch.empty(y.size()).uniform_(0, 1) < self.args.drop_label
-
-            # we basically don't care about the spatial aspects of the code
+            # we don't care about the spatial aspects of the code
             code = x.reshape(x.size(0), -1)
 
             # Mask the encoded tokens
@@ -224,9 +197,7 @@ class MaskGIT(Trainer):
             )
 
             with torch.cuda.amp.autocast():  # half precision
-                pred = self.vit(
-                    masked_code, y, drop_label=drop_label
-                )  # The unmasked tokens prediction
+                pred = self.vit(masked_code)
                 # Cross-entropy loss
                 loss = (
                     self.criterion(
@@ -361,10 +332,8 @@ class MaskGIT(Trainer):
                 f"softmax temperature: {self.args.sm_temp}, cfg weight: {self.args.cfg_w}, "
                 f"gumbel temperature: {self.args.r_temp}"
             )
-        # Evaluate the model
-        m = self.sae.compute_and_log_metrics(self)
         self.vit.train()
-        return m
+        return None
 
     def reco(self, x=None, code=None, masked_code=None, unmasked_code=None, mask=None):
         """For visualization, show the model ability to reconstruct masked img
@@ -421,7 +390,6 @@ class MaskGIT(Trainer):
         self,
         init_code=None,
         nb_sample=50,
-        labels=None,
         sm_temp=1,
         w=3,
         randomize="linear",
@@ -434,7 +402,6 @@ class MaskGIT(Trainer):
         :param
          init_code   -> torch.LongTensor: nb_sample x 16 x 16, the starting initialization code
          nb_sample   -> int:              the number of image to generated
-         labels      -> torch.LongTensor: the list of classes to generate
          sm_temp     -> float:            the temperature before softmax
          w           -> float:            scale for the classifier free guidance
          randomize   -> str:              linear|warm_up|random|no, either or not to add randomness
@@ -449,13 +416,6 @@ class MaskGIT(Trainer):
         l_codes = []  # Save the intermediate codes predicted
         l_mask = []  # Save the intermediate masks
         with torch.no_grad():
-            if labels is None:  # Default classes generated
-                labels = [
-                    1,
-                ] * (nb_sample // 10)
-                labels = torch.LongTensor(labels).to(self.args.device)
-
-            drop = torch.ones(nb_sample, dtype=torch.bool).to(self.args.device)
             if init_code is not None:  # Start with a pre-define code
                 code = init_code
                 mask = (
@@ -497,19 +457,7 @@ class MaskGIT(Trainer):
                     break
 
                 with torch.cuda.amp.autocast():  # half precision
-                    if w != 0:
-                        # Model Prediction
-                        logit = self.vit(
-                            torch.cat([code.clone(), code.clone()], dim=0),
-                            torch.cat([labels, labels], dim=0),
-                            torch.cat([~drop, drop], dim=0),
-                        )
-                        logit_c, logit_u = torch.chunk(logit, 2, dim=0)
-                        _w = w * (indice / (len(scheduler) - 1))
-                        # Classifier Free Guidance
-                        logit = (1 + _w) * logit_c - _w * logit_u
-                    else:
-                        logit = self.vit(code.clone(), labels, drop_label=~drop)
+                    logit = self.vit(code.clone())
 
                 prob = torch.softmax(logit * sm_temp, -1)
                 # Sample the code from the softmax prediction

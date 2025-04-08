@@ -154,17 +154,9 @@ class MaskTransformer(nn.Module):
         """
 
         super().__init__()
-        # self.nclass = nclass
-        # self.patch_size = img_size // 16
         self.patch_size = patch_size
         self.tokens_per_sample = tokens_per_sample
         self.codebook_size = codebook_size
-        # self.tok_emb = nn.Embedding(
-        #     codebook_size + 1 + nclass + 1, hidden_dim
-        # )  # +1 for the mask of the viz token, +1 for mask of the class
-        # self.tok_emb = nn.Embedding(
-        #     codebook_size + 2, code_dim
-        # )  # +1 for the mask of the viz token. +1 for empty token
         self.mask_token = nn.Parameter(torch.randn((1, code_dim)))
         self.empty_token = nn.Parameter(torch.randn((1, code_dim)))
         if learned_pos_emb:
@@ -249,12 +241,10 @@ class MaskTransformer(nn.Module):
         # with torch.no_grad():
         #     self.tok_emb.weight[:-2].requires_grad_(False)
 
-    def forward(self, img_token, y=None, drop_label=None, return_attn=False):
+    def forward(self, img_token, return_attn=False):
         """Forward.
         :param:
             img_token      -> torch.LongTensor: bsize x 16 x 16, the encoded image tokens
-            y              -> torch.LongTensor: condition class to generate
-            drop_label     -> torch.BoolTensor: either or not to drop the condition
             return_attn    -> Bool: return the attn for visualization
         :return:
             logit:         -> torch.FloatTensor: bsize x path_size*path_size * 1024, the predicted logit
@@ -262,14 +252,6 @@ class MaskTransformer(nn.Module):
         """
         b = img_token.size(0)
 
-        # cls_token = (
-        #     y.view(b, -1) + self.codebook_size + 1
-        # )  # Shift the class token by the amount of codebook
-
-        # cls_token[drop_label] = self.codebook_size + 1 + self.nclass  # Drop condition
-        # input = torch.cat(
-        #     [img_token.view(b, -1), cls_token.view(b, -1)], -1
-        # )  # concat visual tokens and class tokens
         input = img_token.view(b, -1)
         tok_embeddings = self.tok_emb(input)
 

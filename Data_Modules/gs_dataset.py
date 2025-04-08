@@ -37,8 +37,12 @@ class GS_Dataset(torch.utils.data.Dataset):
         self.temporal_size = temporal_size
         self.codebook_size = codebook_size
         self.empty_delta = empty_delta
-        self.conditionalise_dim = None if conditionalise_dim == -1 else conditionalise_dim
-        self.spatial_multiplier_ = 1 if self.conditionalise_dim is None else self.spatial_size
+        self.conditionalise_dim = (
+            None if conditionalise_dim == -1 else conditionalise_dim
+        )
+        self.spatial_multiplier_ = (
+            1 if self.conditionalise_dim is None else self.spatial_size
+        )
 
         n_scenes_tot = len(os.listdir(data_folder))
         n_scenes_train = int(n_scenes_tot * split)
@@ -46,7 +50,6 @@ class GS_Dataset(torch.utils.data.Dataset):
             self.scenes = range(n_scenes_train)
         else:
             self.scenes = range(n_scenes_train, n_scenes_tot)
-
 
     def load_sf(self, scene, frame, slce=None):
         path = os.path.join(
@@ -63,14 +66,16 @@ class GS_Dataset(torch.utils.data.Dataset):
                 raise ValueError("slce must be provided if we are conditionalising")
             if slce not in spatial_locations[:, self.conditionalise_dim]:
                 slce = spatial_locations[:, self.conditionalise_dim][0]
-            spatial_locations_mask = spatial_locations[:, self.conditionalise_dim] == slce
+            spatial_locations_mask = (
+                spatial_locations[:, self.conditionalise_dim] == slce
+            )
             spatial_locations = spatial_locations[spatial_locations_mask]
             codebook_indices = codebook_indices[spatial_locations_mask]
             spatial_dims = [i for i in range(3) if i != self.conditionalise_dim]
             spatial_locations = spatial_locations[:, spatial_dims]
 
         retval = np.full(
-            self.spatial_size ** n_spatial_dims,
+            self.spatial_size**n_spatial_dims,
             self.codebook_size + self.empty_delta - 1,
         )
         spatial_indices = np.ravel_multi_index(
@@ -78,14 +83,18 @@ class GS_Dataset(torch.utils.data.Dataset):
             [self.spatial_size] * n_spatial_dims,
         )
         retval[spatial_indices] = codebook_indices
-        return retval, torch.tensor(0)
+        return retval
 
     def __len__(self):
         if self.temporal:
-            return len(self.scenes) * (self.temporal_size - self.temporal_window + 1) * self.spatial_multiplier_
+            return (
+                len(self.scenes)
+                * (self.temporal_size - self.temporal_window + 1)
+                * self.spatial_multiplier_
+            )
         else:
             return len(self.scenes) * self.temporal_size * self.spatial_multiplier_
-        
+
     def datum_size(self):
         ds = self.spatial_size ** (3 if self.conditionalise_dim is None else 2)
         if self.temporal:
@@ -97,8 +106,11 @@ class GS_Dataset(torch.utils.data.Dataset):
             slce = idx % self.spatial_multiplier_
             idx //= self.spatial_multiplier_
             scene = self.scenes[idx]
-            retval = [self.load_sf(scene, frame, slce) for frame in range(self.temporal_window)]
-            retval = tuple(np.stack([r[i] for r in retval], axis=0).flatten() for i in range(len(retval[0])))
+            retval = [
+                self.load_sf(scene, frame, slce)
+                for frame in range(self.temporal_window)
+            ]
+            retval = np.stack(retval)
             return retval
         else:
             slce = idx % self.spatial_multiplier_
@@ -107,35 +119,64 @@ class GS_Dataset(torch.utils.data.Dataset):
             scene = self.scenes[scene_idx]
             frame = idx % self.temporal_size
             return self.load_sf(scene, frame, slce)
-        
+
+
 if __name__ == "__main__":
     data_folder = "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook_indices/"
-    ts=32
+    ts = 32
     sps = 7
-    n_scenes = int(400*0.8)
+    n_scenes = int(400 * 0.8)
 
     # first test full dataset
     tw = 4
-    ds_full = GS_Dataset(data_folder, temporal=True, temporal_size=ts, spatial_size=sps, temporal_window=tw, train=True)
-    assert len(ds_full) == (ts-tw+1) * n_scenes, f"len(ds_full) = {len(ds_full)}, expected {(ts-tw+1) * n_scenes}"
-    assert len(ds_full[0][0]) == ds_full.datum_size(), f"ds_full[0][0] = {ds_full[0][0]}, expected {ds_full.datum_size()}"
+    ds_full = GS_Dataset(
+        data_folder,
+        temporal=True,
+        temporal_size=ts,
+        spatial_size=sps,
+        temporal_window=tw,
+        train=True,
+    )
+    assert (
+        len(ds_full) == (ts - tw + 1) * n_scenes
+    ), f"len(ds_full) = {len(ds_full)}, expected {(ts-tw+1) * n_scenes}"
+    assert (
+        len(ds_full[0][0]) == ds_full.datum_size()
+    ), f"ds_full[0][0] = {ds_full[0][0]}, expected {ds_full.datum_size()}"
     print("Full dataset")
     print(ds_full[0][0].shape)
     print("-------")
 
     # without temporal component
-    ds_no_temp = GS_Dataset(data_folder, temporal=False, spatial_size=sps, temporal_window=tw, train=True)
-    assert len(ds_no_temp) == (ts) * n_scenes, f"len(ds_full) = {len(ds_no_temp)}, expected {(ts) * n_scenes}"
-    assert len(ds_no_temp[0][0]) == ds_no_temp.datum_size(), f"ds_no_temp[0][0] = {ds_no_temp[0][0]}, expected {ds_no_temp.datum_size()}"
+    ds_no_temp = GS_Dataset(
+        data_folder, temporal=False, spatial_size=sps, temporal_window=tw, train=True
+    )
+    assert (
+        len(ds_no_temp) == (ts) * n_scenes
+    ), f"len(ds_full) = {len(ds_no_temp)}, expected {(ts) * n_scenes}"
+    assert (
+        len(ds_no_temp[0][0]) == ds_no_temp.datum_size()
+    ), f"ds_no_temp[0][0] = {ds_no_temp[0][0]}, expected {ds_no_temp.datum_size()}"
     print("No temporal")
     print(ds_no_temp[0][0].shape)
     print("-------")
 
     # taking slices
     cd = 2
-    ds_slice = GS_Dataset(data_folder, temporal=False, conditionalise_dim=cd, temporal_size=ts, spatial_size=sps, train=True)
-    assert len(ds_slice) == (ts) * n_scenes * sps, f"len(ds_full) = {len(ds_slice)}, expected {(ts) * n_scenes * sps}"
-    assert len(ds_slice[0][0]) == ds_slice.datum_size(), f"ds_slice[0][0] = {ds_slice[0][0]}, expected {ds_slice.datum_size}"
+    ds_slice = GS_Dataset(
+        data_folder,
+        temporal=False,
+        conditionalise_dim=cd,
+        temporal_size=ts,
+        spatial_size=sps,
+        train=True,
+    )
+    assert (
+        len(ds_slice) == (ts) * n_scenes * sps
+    ), f"len(ds_full) = {len(ds_slice)}, expected {(ts) * n_scenes * sps}"
+    assert (
+        len(ds_slice[0][0]) == ds_slice.datum_size()
+    ), f"ds_slice[0][0] = {ds_slice[0][0]}, expected {ds_slice.datum_size}"
     print("Spatial slice")
     print(ds_slice[0][0].shape)
     print("-------")

@@ -18,48 +18,6 @@ def main(args):
     if args.test_only:  # Evaluate the networks
         maskgit.eval()
 
-    elif args.debug:  # custom code for testing inference
-        import torchvision.utils as vutils
-        from torchvision.utils import save_image
-
-        with torch.no_grad():
-            labels, name = [
-                1,
-                7,
-                282,
-                604,
-                724,
-                179,
-                681,
-                367,
-                635,
-                random.randint(0, 999),
-            ] * 1, "r_row"
-            labels = torch.LongTensor(labels).to(args.device)
-            sm_temp = 1.3  # Softmax Temperature
-            r_temp = 7  # Gumbel Temperature
-            w = 9  # Classifier Free Guidance
-            randomize = "linear"  # Noise scheduler
-            step = 32  # Number of step
-            sched_mode = "arccos"  # Mode of the scheduler
-            # Generate sample
-            gen_sample, _, _ = maskgit.sample(
-                nb_sample=labels.size(0),
-                labels=labels,
-                sm_temp=sm_temp,
-                r_temp=r_temp,
-                w=w,
-                randomize=randomize,
-                sched_mode=sched_mode,
-                step=step,
-            )
-            gen_sample = vutils.make_grid(gen_sample, nrow=5, padding=2, normalize=True)
-            # Save image
-            save_image(
-                gen_sample,
-                f"saved_img/sched_{sched_mode}_step={step}_temp={sm_temp}"
-                f"_w={w}_randomize={randomize}_{name}.jpg",
-            )
     else:  # Begin training
         maskgit.fit()
 
@@ -160,9 +118,6 @@ if __name__ == "__main__":
         type=float,
         default=1.0,
         help="temperature before softmax when sampling",
-    )
-    parser.add_argument(
-        "--drop-label", type=float, default=0.1, help="drop rate for cfg"
     )
     parser.add_argument(
         "--test-only", action="store_true", help="only evaluate the model"
