@@ -4,5 +4,6 @@ Dataset/
 a.png
 colab_demo.ipynb
 .vscode/
+.prettierrc
 
 *.pth
