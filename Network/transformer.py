@@ -127,7 +127,6 @@ class TransformerEncoder(nn.Module):
 class MaskTransformer(nn.Module):
     def __init__(
         self,
-        img_size=256,
         code_dim=768,
         hidden_dim=768,
         codebook_size=1024,
@@ -136,14 +135,12 @@ class MaskTransformer(nn.Module):
         mlp_dim=3072,
         dropout=0.1,
         dims=3,
-        patch_size=15,
         learned_pos_emb=False,
         tokens_per_sample=7**3
         # nclass=1000,
     ):
         """Initialize the Transformer model.
         :param:
-            img_size       -> int:     Input image size (default: 256)
             hidden_dim     -> int:     Hidden dimension for the transformer (default: 768)
             codebook_size  -> int:     Size of the codebook (default: 1024)
             depth          -> int:     Depth of the transformer (default: 24)
@@ -154,7 +151,6 @@ class MaskTransformer(nn.Module):
         """
 
         super().__init__()
-        self.patch_size = patch_size
         self.tokens_per_sample = tokens_per_sample
         self.codebook_size = codebook_size
         self.mask_token = nn.Parameter(torch.randn((1, code_dim)))

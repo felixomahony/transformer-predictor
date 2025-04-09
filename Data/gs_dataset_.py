@@ -6,7 +6,7 @@ import torch
 class GS_Dataset(torch.utils.data.Dataset):
     def __init__(
         self,
-        data_folder,
+        path,
         temporal=False,
         conditionalise_dim=-1,
         temporal_size=32,
@@ -30,7 +30,7 @@ class GS_Dataset(torch.utils.data.Dataset):
         train: whether to use the training or testing set
         split: fraction of scenes to use for training
         """
-        self.data_folder = data_folder
+        self.path = path
         self.temporal = temporal
         self.temporal_window = temporal_window
         self.spatial_size = spatial_size
@@ -44,7 +44,7 @@ class GS_Dataset(torch.utils.data.Dataset):
             1 if self.conditionalise_dim is None else self.spatial_size
         )
 
-        n_scenes_tot = len(os.listdir(data_folder))
+        n_scenes_tot = len(os.listdir(path))
         n_scenes_train = int(n_scenes_tot * split)
         if train:
             self.scenes = range(n_scenes_train)
@@ -53,7 +53,7 @@ class GS_Dataset(torch.utils.data.Dataset):
 
     def load_sf(self, scene, frame, slce=None):
         path = os.path.join(
-            self.data_folder, f"scene_{scene:04d}", f"frame_{frame:04d}.npz"
+            self.path, f"scene_{scene:04d}", f"frame_{frame:04d}.npz"
         )
         data = np.load(path)
         spatial_locations = data["spatial_locations"]
@@ -95,10 +95,11 @@ class GS_Dataset(torch.utils.data.Dataset):
         else:
             return len(self.scenes) * self.temporal_size * self.spatial_multiplier_
 
-    def datum_size(self):
-        ds = self.spatial_size ** (3 if self.conditionalise_dim is None else 2)
-        if self.temporal:
-            ds *= self.temporal_window
+    @staticmethod
+    def datum_size(**kwargs):
+        ds = kwargs["spatial_size"] ** (3 if kwargs["conditionalise_dim"] is None else 2)
+        if kwargs["temporal"]:
+            ds *=kwargs["temporal_window"]
         return ds
 
     def __getitem__(self, idx):

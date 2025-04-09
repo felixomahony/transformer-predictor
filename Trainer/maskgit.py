@@ -1,113 +1,97 @@
-# Trainer for MaskGIT
 import os
-import random
 import time
 import math
 
 import numpy as np
+
 from tqdm import tqdm
-from collections import deque
-from omegaconf import OmegaConf
+
+# import pca from sklearn
+from sklearn.decomposition import PCA
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.utils as vutils
-from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.optim as optim
+import pytorch_lightning as pl
+import matplotlib.pyplot as plt
 
-from Trainer.trainer import Trainer
 from Network.transformer import MaskTransformer
+from Data import GS_Dataset
 
 
-
-class MaskGIT(Trainer):
+class MaskGIT(pl.LightningModule):
 
     def __init__(self, args):
         """Initialization of the model (VQGAN and Masked Transformer), optimizer, criterion, etc."""
-        super().__init__(args)
-        self.args = args  # Main argument see main.py
-        self.scaler = torch.cuda.amp.GradScaler()  # Init Scaler for multi GPUs
-        if self.args.load_vqgan:
-            self.ae = self.get_network("autoencoder")
-            self.codebook_size = self.ae.n_embed
-            self.patch_size = self.args.img_size // 2 ** (
-                self.ae.encoder.num_resolutions - 1
-            )  # Load VQGAN
-        else:
-            self.ae = None
-            self.codebook_size = (
-                self.args.codebook_size
-            )  # this is the number of entries in the codebook, not the size of an entry
-            self.patch_size = args.patch_size
-        print("Acquired codebook size:", self.codebook_size)
+        super().__init__()
+        self.args = args
 
-        # Load data if aim to train or test the model
-        self.train_data, self.test_data = self.get_data(temporal=args.temporal, conditionalise_dim=args.conditionalise_dim)
-
-        self.tokens_per_sample = self.train_data.dataset.datum_size()
+        self.tokens_per_sample = GS_Dataset.datum_size(**args.data.ka)
         self.vit = self.get_network(
-            "vit", hidden_dim=self.args.hidden_dim, tokens_per_sample=self.tokens_per_sample
+            tokens_per_sample=self.tokens_per_sample,
+            codebook_size=self.args.vqvae.codebook_n,
+            code_dim=self.args.vqvae.hidden_dim,
+            **self.args.vit.ka,
         )  # Load Masked Bidirectional Transformer
-        print("Number of params: ", sum(p.numel() for p in self.vit.parameters()))
-        if self.args.codebook_path != "":
-            self.vit.load_codebook(self.args.codebook_path)
-        self.criterion = self.get_loss(
-            "cross_entropy"
-        )  # Get cross entropy loss
-        self.optim = self.get_optim(
-            self.vit, self.args.lr, betas=(0.9, 0.96)
-        )  # Get Adam Optimizer with weight decay
+        self.criterion = nn.CrossEntropyLoss()
 
-    def get_network(self, archi, hidden_dim=768, **kwargs):
+        self.sched_func = {
+            "root": lambda r: 1 - (r**0.5),
+            "linear": lambda r: 1 - r,
+            "square": lambda r: 1 - (r**2),
+            "cosine": lambda r: torch.cos(r * math.pi * 0.5),
+            "arccos": lambda r: torch.arccos(r) / (math.pi * 0.5),
+        }
+
+    def get_network(
+        self,
+        tokens_per_sample,
+        codebook_size,
+        code_dim=768,
+        depth=24,
+        heads=16,
+        mlp_dim=3072,
+        dropout=0.1,
+        **kwargs,
+    ):
         """return the network, load checkpoint if self.args.resume == True
         :param
             archi -> str: vit|autoencoder, the architecture to load
         :return
             model -> nn.Module: the network
         """
-        if archi == "vit":
-            model = MaskTransformer(
-                img_size=self.args.img_size,
-                code_dim=hidden_dim,
-                codebook_size=self.codebook_size,
-                depth=24,
-                heads=16,
-                mlp_dim=3072,
-                dropout=0.1,  # Small
-                patch_size=self.patch_size,
-                tokens_per_sample=self.tokens_per_sample,
-            )
+        model = MaskTransformer(
+            code_dim=code_dim,
+            codebook_size=codebook_size,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            dropout=dropout,  # Small
+            tokens_per_sample=tokens_per_sample,
+        )
 
-            if self.args.resume:
-                ckpt = self.args.vit_folder
-                ckpt += "current.pth" if os.path.isdir(self.args.vit_folder) else ""
-                if self.args.is_master:
-                    print("load ckpt from:", ckpt)
-                # Read checkpoint file
-                checkpoint = torch.load(ckpt, map_location="cpu")
-                # Update the current epoch and iteration
-                self.args.iter += checkpoint["iter"]
-                self.args.global_epoch += checkpoint["global_epoch"]
-                # Load network
-                model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        if self.args.run.resume:
+            ckpt = self.args.vit.vit_folder
+            ckpt += "current.pth" if os.path.isdir(self.args.vit.vit_folder) else ""
+            print("load ckpt from:", ckpt)
+            # Read checkpoint file
+            checkpoint = torch.load(ckpt, map_location="cpu")
+            # Update the current epoch and iteration
+            # self.args.iter += checkpoint["iter"]
+            # self.args.global_epoch += checkpoint["global_epoch"]
+            # Load network
+            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
-            model = model.to(self.args.device)
-            if self.args.is_multi_gpus:  # put model on multi GPUs if available
-                model = DDP(model, device_ids=[self.args.device])
-
+        if self.args.vqvae.codebook_path != "":
+            model.load_codebook(self.args.vqvae.codebook_path)
         else:
-            model = None
-
-        if self.args.is_master:
-            print(
-                f"Size of model {archi}: "
-                f"{sum(p.numel() for p in model.parameters() if p.requires_grad) / 10 ** 6:.3f}M"
+            raise ValueError(
+                "Please provide the path to the codebook file in the configuration."
             )
 
         return model
 
-    @staticmethod
-    def get_mask_code(code, mode="arccos", value=None, codebook_size=256):
+    def get_mask_code(self, code, mode="arccos", value=None, codebook_size=256):
         """Replace the code token by *value* according the the *mode* scheduler
         :param
          code  -> torch.LongTensor(): bsize * 16 * 16, the unmasked code
@@ -118,16 +102,7 @@ class MaskGIT(Trainer):
          mask        -> torch.LongTensor(): bsize * 16 * 16, the binary mask of the mask
         """
         r = torch.rand(code.size(0))
-        if mode == "linear":  # linear scheduler
-            val_to_mask = r
-        elif mode == "square":  # square scheduler
-            val_to_mask = r**2
-        elif mode == "cosine":  # cosine scheduler
-            val_to_mask = torch.cos(r * math.pi * 0.5)
-        elif mode == "arccos":  # arc cosine scheduler
-            val_to_mask = torch.arccos(r) / (math.pi * 0.5)
-        else:
-            val_to_mask = None
+        val_to_mask = self.sched_func[mode](r)
 
         mask_code = code.detach().clone()
         # Sample the amount of tokens + localization to mask
@@ -151,240 +126,104 @@ class MaskGIT(Trainer):
          scheduler -> torch.LongTensor(): the list of token to predict at each step
         """
         r = torch.linspace(1, 0, step)
-        if mode == "root":  # root scheduler
-            val_to_mask = 1 - (r**0.5)
-        elif mode == "linear":  # linear scheduler
-            val_to_mask = 1 - r
-        elif mode == "square":  # square scheduler
-            val_to_mask = 1 - (r**2)
-        elif mode == "cosine":  # cosine scheduler
-            val_to_mask = torch.cos(r * math.pi * 0.5)
-        elif mode == "arccos":  # arc cosine scheduler
-            val_to_mask = torch.arccos(r) / (math.pi * 0.5)
-        else:
-            return
+        val_to_mask = self.sched_func[mode](r)
 
         # fill the scheduler by the ratio of tokens to predict at each step
         sche = (val_to_mask / val_to_mask.sum()) * (self.tokens_per_sample)
         sche = sche.round()
         sche[sche == 0] = 1  # add 1 to predict a least 1 token / step
-        sche[-1] += (
-            self.tokens_per_sample
-        ) - sche.sum()  # need to sum up nb of code
+        sche[-1] += (self.tokens_per_sample) - sche.sum()  # need to sum up nb of code
         return tqdm(sche.int(), leave=leave)
 
-    def train_one_epoch(self, log_iter=2500, emptiness_loss=True):
-        """Train the model for 1 epoch"""
-        self.vit.train()
-        cum_loss = 0.0
-        window_loss = deque(maxlen=self.args.grad_cum)
-        bar = (
-            tqdm(self.train_data, leave=False)
-            if self.args.is_master
-            else self.train_data
-        )
-        n = len(self.train_data)
-        # Start training for 1 epoch
-        for x in bar:
-            x = x.to(self.args.device)
-
-            # we don't care about the spatial aspects of the code
-            code = x.reshape(x.size(0), -1)
-
-            # Mask the encoded tokens
-            masked_code, mask = self.get_mask_code(
-                code, value=self.args.mask_value, codebook_size=self.codebook_size
-            )
-
-            with torch.cuda.amp.autocast():  # half precision
-                pred = self.vit(masked_code)
-                # Cross-entropy loss
-                loss = (
-                    self.criterion(
-                        pred.reshape(-1, self.codebook_size + 2), code.view(-1)
-                    )
-                    / self.args.grad_cum
-                )
-                if emptiness_loss:
-                    code_empty = torch.maximum(code, torch.tensor([self.codebook_size-1], device=code.device)) - self.codebook_size + 1
-                    
-                    pred_probs = torch.softmax(pred, dim=-1)
-                    pred_empty = torch.zeros_like(pred[..., :3])
-                    pred_empty[:, :, -2:] = pred_probs[:, :, -2:]
-                    pred_empty[:, :, 0] = torch.sum(pred_probs[:, :, :-2], dim=-1)
-                    # invert softmax
-                    pred_empty = torch.log(pred_empty + 1e-8)
-                    loss += (
-                        self.criterion(
-                            pred_empty.reshape(-1, 3),
-                            code_empty.view(-1),
-                        )
-                    )
-
-            # update weight if accumulation of gradient is done
-            update_grad = self.args.iter % self.args.grad_cum == self.args.grad_cum - 1
-            if update_grad:
-                self.optim.zero_grad()
-
-            self.scaler.scale(loss).backward()  # rescale to get more precise loss
-
-            if update_grad:
-                self.scaler.unscale_(self.optim)  # rescale loss
-                nn.utils.clip_grad_norm_(self.vit.parameters(), 1.0)  # Clip gradient
-                self.scaler.step(self.optim)
-                self.scaler.update()
-
-            cum_loss += loss.cpu().item()
-            window_loss.append(loss.data.cpu().numpy().mean())
-            # logs
-            if update_grad and self.args.is_master:
-                self.log_add_scalar(
-                    "Train/Loss", np.array(window_loss).sum(), self.args.iter
-                )
-
-            if self.args.iter % log_iter == 0 and self.args.is_master:
-                if False:
-                    # Generate sample for visualization
-                    gen_sample = self.sample(nb_sample=10)[0]
-                    gen_sample = vutils.make_grid(
-                        gen_sample, nrow=10, padding=2, normalize=True
-                    )
-                    self.log_add_img("Images/Sampling", gen_sample, self.args.iter)
-                    # Show reconstruction
-                    unmasked_code = torch.softmax(pred, -1).max(-1)[1]
-                    reco_sample = self.reco(
-                        x=x[:10],
-                        code=code[:10],
-                        unmasked_code=unmasked_code[:10],
-                        mask=mask[:10],
-                    )
-                    reco_sample = vutils.make_grid(
-                        reco_sample.data, nrow=10, padding=2, normalize=True
-                    )
-                    self.log_add_img(
-                        "Images/Reconstruction", reco_sample, self.args.iter
-                    )
-
-                # Save Network
-                self.save_network(
-                    model=self.vit,
-                    path=self.args.vit_folder + "current.pth",
-                    iter=self.args.iter,
-                    optimizer=self.optim,
-                    global_epoch=self.args.global_epoch,
-                )
-
-            self.args.iter += 1
-
-        return cum_loss / n
-
-    def fit(self):
-        """Train the model"""
-        if self.args.is_master:
-            print("Start training:")
-
-        start = time.time()
-        # Start training
-        for e in range(self.args.global_epoch, self.args.epoch):
-            # synch every GPUs
-            if self.args.is_multi_gpus:
-                self.train_data.sampler.set_epoch(e)
-
-            # Train for one epoch
-            train_loss = self.train_one_epoch()
-
-            # Synch loss
-            if self.args.is_multi_gpus:
-                train_loss = self.all_gather(train_loss, torch.cuda.device_count())
-
-            # Save model
-            if e % 10 == 0 and self.args.is_master:
-                self.save_network(
-                    model=self.vit,
-                    path=self.args.vit_folder
-                    + f"epoch_{self.args.global_epoch:03d}.pth",
-                    iter=self.args.iter,
-                    optimizer=self.optim,
-                    global_epoch=self.args.global_epoch,
-                )
-
-            # Clock time
-            clock_time = time.time() - start
-            if self.args.is_master:
-                self.log_add_scalar(
-                    "Train/GlobalLoss", train_loss, self.args.global_epoch
-                )
-                print(
-                    f"\rEpoch {self.args.global_epoch},"
-                    f" Iter {self.args.iter :},"
-                    f" Loss {train_loss:.4f},"
-                    f" Time: {clock_time // 3600:.0f}h {(clock_time % 3600) // 60:.0f}min {clock_time % 60:.2f}s"
-                )
-            self.args.global_epoch += 1
-
-    def eval(self):
-        """Evaluation of the model"""
-        self.vit.eval()
-        if self.args.is_master:
-            print(
-                f"Evaluation with hyper-parameter ->\n"
-                f"scheduler: {self.args.sched_mode}, number of step: {self.args.step}, "
-                f"softmax temperature: {self.args.sm_temp}, cfg weight: {self.args.cfg_w}, "
-                f"gumbel temperature: {self.args.r_temp}"
-            )
-        self.vit.train()
-        return None
-
-    def reco(self, x=None, code=None, masked_code=None, unmasked_code=None, mask=None):
-        """For visualization, show the model ability to reconstruct masked img
+    def calc_loss(self, pred, code):
+        """Calculate the loss between the predicted and target code
         :param
-         x             -> torch.FloatTensor: bsize x 3 x 256 x 256, the real image
-         code          -> torch.LongTensor: bsize x 16 x 16, the encoded image tokens
-         masked_code   -> torch.LongTensor: bsize x 16 x 16, the masked image tokens
-         unmasked_code -> torch.LongTensor: bsize x 16 x 16, the prediction of the transformer
-         mask          -> torch.LongTensor: bsize x 16 x 16, the binary mask of the encoded image
+         pred -> torch.LongTensor(): bsize * 16 * 16, the predicted code
+         code -> torch.LongTensor(): bsize * 16 * 16, the target code
         :return
-         l_visual      -> torch.LongTensor: bsize x 3 x (256 x ?) x 256, the visualization of the images
+         loss -> float: the loss value
         """
-        l_visual = [x]
-        with torch.no_grad():
-            if code is not None:
-                code = code.view(code.size(0), self.patch_size, self.patch_size)
-                # Decoding reel code
-                _x = self.ae.decode_code(torch.clamp(code, 0, self.codebook_size - 1))
-                if mask is not None:
-                    # Decoding reel code with mask to hide
-                    mask = mask.view(
-                        code.size(0), 1, self.patch_size, self.patch_size
-                    ).float()
-                    __x2 = _x * (
-                        1
-                        - F.interpolate(
-                            mask, (self.args.img_size, self.args.img_size)
-                        ).to(self.args.device)
-                    )
-                    l_visual.append(__x2)
-            if masked_code is not None:
-                # Decoding masked code
-                masked_code = masked_code.view(
-                    code.size(0), self.patch_size, self.patch_size
-                )
-                __x = self.ae.decode_code(
-                    torch.clamp(masked_code, 0, self.codebook_size - 1)
-                )
-                l_visual.append(__x)
+        loss_dict = {}
+        # Cross-entropy loss
+        ce_loss = self.criterion(
+            pred.reshape(-1, self.args.vqvae.codebook_n + 2), code.view(-1)
+        )
+        loss_dict["ce_loss"] = ce_loss
+        loss = ce_loss
 
-            if unmasked_code is not None:
-                # Decoding predicted code
-                unmasked_code = unmasked_code.view(
-                    code.size(0), self.patch_size, self.patch_size
+        if self.args.learning.emptiness_loss:
+            code_empty = (
+                torch.maximum(
+                    code,
+                    torch.tensor([self.args.vqvae.codebook_n - 1], device=code.device),
                 )
-                ___x = self.ae.decode_code(
-                    torch.clamp(unmasked_code, 0, self.codebook_size - 1)
-                )
-                l_visual.append(___x)
+                - self.args.vqvae.codebook_n
+                + 1
+            )
 
-        return torch.cat(l_visual, dim=0)
+            pred_probs = torch.softmax(pred, dim=-1)
+            pred_empty = torch.zeros_like(pred[..., :3])
+            pred_empty[:, :, -2:] = pred_probs[:, :, -2:]
+            pred_empty[:, :, 0] = torch.sum(pred_probs[:, :, :-2], dim=-1)
+            # invert softmax
+            pred_empty = torch.log(pred_empty + 1e-8)
+            emptiness_loss = self.criterion(
+                pred_empty.reshape(-1, 3),
+                code_empty.view(-1),
+            )
+            loss_dict["emptiness_loss"] = emptiness_loss
+            loss += emptiness_loss
+
+        loss_dict["loss_total"] = loss
+        return loss, loss_dict
+
+    def training_step(self, batch, batch_idx):
+        # we don't care about the spatial aspects of the code
+        code = batch.reshape(batch.size(0), -1)
+
+        # Mask the encoded tokens
+        masked_code, _ = self.get_mask_code(
+            code,
+            value=self.args.vit.mask_value,
+            codebook_size=self.args.vqvae.codebook_n,
+        )
+
+        with torch.amp.autocast("cuda"):  # half precision
+            pred = self.vit(masked_code)
+            # Cross-entropy loss
+            loss, loss_dict = self.calc_loss(pred, code)
+
+        self.log_all(train=True, loss_dict=loss_dict)
+        return {
+            "loss": loss,
+            "input_code": code,
+            "masked_code": masked_code,
+            "pred_code": pred,
+        }
+
+    def validation_step(self, batch, batch_idx):
+        # we don't care about the spatial aspects of the code
+        code = batch.reshape(batch.size(0), -1)
+
+        # Mask the encoded tokens
+        masked_code, _ = self.get_mask_code(
+            code,
+            value=self.args.vit.mask_value,
+            codebook_size=self.args.vqvae.codebook_n,
+        )
+
+        with torch.amp.autocast("cuda"):
+            pred = self.vit(masked_code)
+            # Cross-entropy loss
+            loss, loss_dict = self.calc_loss(pred, code)
+
+        self.log_all(train=False, loss_dict=loss_dict)
+        return loss
+
+    def log_all(self, train, loss_dict):
+        prefix = "train" if train else "val"
+        for k, v in loss_dict.items():
+            self.log(f"{prefix}/{k}", v, prog_bar=k == "loss_total", logger=True)
 
     def sample(
         self,
@@ -419,25 +258,25 @@ class MaskGIT(Trainer):
             if init_code is not None:  # Start with a pre-define code
                 code = init_code
                 mask = (
-                    (init_code == self.codebook_size)
+                    (init_code == self.args.vqvae.codebook_n)
                     .float()
                     .view(nb_sample, self.tokens_per_sample)
                 )
             else:  # Initialize a code
-                if self.args.mask_value < 0:  # Code initialize with random tokens
+                if self.args.vit.mask_value < 0:  # Code initialize with random tokens
                     code = torch.randint(
                         0,
-                        self.codebook_size,
+                        self.args.vqvae.codebook_n,
                         (nb_sample, self.tokens_per_sample),
-                    ).to(self.args.device)
+                    ).to(self.args.run.device)
                 else:  # Code initialize with masked tokens
                     code = torch.full(
                         (nb_sample, self.tokens_per_sample),
-                        self.args.mask_value,
-                    ).to(self.args.device)
-                mask = torch.ones(
-                    nb_sample, self.tokens_per_sample
-                ).to(self.args.device)
+                        self.args.vit.mask_value,
+                    ).to(self.args.run.device)
+                mask = torch.ones(nb_sample, self.tokens_per_sample).to(
+                    self.args.run.device
+                )
 
             # Instantiate scheduler
             if isinstance(sched_mode, str):  # Standard ones
@@ -489,7 +328,7 @@ class MaskGIT(Trainer):
                         * (1 - ratio)
                     )
                     conf = torch.log(conf.squeeze()) + torch.from_numpy(rand).to(
-                        self.args.device
+                        self.args.run.device
                     )
                 elif (
                     randomize == "warm_up"
@@ -515,32 +354,20 @@ class MaskGIT(Trainer):
                 )
                 if not with_replacement:
                     f_mask = (
-                        mask.view(
-                            nb_sample, self.tokens_per_sample
-                        ).float()
-                        * conf.view(
-                            nb_sample, self.tokens_per_sample
-                        ).float()
+                        mask.view(nb_sample, self.tokens_per_sample).float()
+                        * conf.view(nb_sample, self.tokens_per_sample).float()
                     ).bool()
                 else:
                     f_mask = torch.ones_like(code).bool()
-                code[f_mask] = pred_code.view(
-                    nb_sample, self.tokens_per_sample
-                )[f_mask]
+                code[f_mask] = pred_code.view(nb_sample, self.tokens_per_sample)[f_mask]
 
                 # update the mask
                 for i_mask, ind_mask in enumerate(indice_mask):
                     mask[i_mask, ind_mask] = 0
                 l_codes.append(
-                    pred_code.view(
-                        nb_sample, self.tokens_per_sample
-                    ).clone()
+                    pred_code.view(nb_sample, self.tokens_per_sample).clone()
                 )
-                l_mask.append(
-                    mask.view(
-                        nb_sample, self.tokens_per_sample
-                    ).clone()
-                )
+                l_mask.append(mask.view(nb_sample, self.tokens_per_sample).clone())
 
             # decode the final prediction
             # _code = torch.clamp(code, 0, self.codebook_size + 1)
@@ -548,3 +375,12 @@ class MaskGIT(Trainer):
 
         self.vit.train()
         return code, l_codes, l_mask
+
+    def configure_optimizers(self):
+
+        params = self.vit.parameters()
+        lr = self.args.learning.lr
+
+        optimizer = optim.AdamW(params, lr, weight_decay=1e-5, betas=(0.9, 0.96))
+
+        return optimizer
