@@ -1,0 +1,38 @@
+run:
+  resume: false
+  test_only: false
+  seed: 42
+logging:
+  save_dir: "lightning_logs"
+  name: "untitled"
+  version: "0"
+trainer:
+  max_epochs: 10
+  log_every_n_steps: 100
+  accelerator: "cuda"
+learning:
+  lr: 0.01
+  emptiness_loss: true
+vit:
+  vit_folder: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/maskgit_2d_full/"
+  depth: 24
+  heads: 16
+  mlp_dim: 3072
+  dropout: 0.1
+  step: 8
+  mask_value: 1000
+  empty_value: 1001
+  r_temp: 4.5
+  sm_temp: 1.0
+  sched_mode: "arccos"
+vqvae:
+  codebook_path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook.npy"
+  codebook_n: 1000
+  hidden_dim: 4
+data:
+  batch_size: 64
+  num_workers: 8
+  path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook_indices/"
+  temporal: false
+  conditionalise_dim: 2
+  spatial_size: 7
