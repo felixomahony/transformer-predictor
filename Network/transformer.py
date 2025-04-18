@@ -3,125 +3,15 @@ import torch
 from torch import nn
 import numpy as np
 import torch.nn.functional as F
-from Network.attention import MultiHeadAttention
-
-class PreNorm(nn.Module):
-
-    def __init__(self, dim, fn):
-        """PreNorm module to apply layer normalization before a given function
-        :param:
-            dim  -> int: Dimension of the input
-            fn   -> nn.Module: The function to apply after layer normalization
-        """
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        """Forward pass through the PreNorm module
-        :param:
-            x        -> torch.Tensor: Input tensor
-            **kwargs -> _ : Additional keyword arguments for the function
-        :return
-            torch.Tensor: Output of the function applied after layer normalization
-        """
-        x = torch.clamp(x, torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
-        return self.fn(self.norm(x), **kwargs)
+from Network.base_modules import TransformerEncoder
+from enum import Enum
 
 
-class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.0):
-        """Initialize the Multi-Layer Perceptron (MLP).
-        :param:
-            dim        -> int : Dimension of the input
-            dim        -> int : Dimension of the hidden layer
-            dim        -> float : Dropout rate
-        """
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, hidden_dim, bias=True),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, dim, bias=True),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        """Forward pass through the MLP module.
-        :param:
-            x -> torch.Tensor: Input tensor
-        :return
-            torch.Tensor: Output of the function applied after layer
-        """
-        return self.net(x)
-
-
-class Attention(nn.Module):
-    def __init__(self, embed_dim, num_heads, dropout=0.0):
-        """Initialize the Attention module.
-        :param:
-            embed_dim     -> int : Dimension of the embedding
-            num_heads     -> int : Number of heads
-            dropout       -> float : Dropout rate
-        """
-        super(Attention, self).__init__()
-        self.dim = embed_dim
-        # self.mha = nn.MultiheadAttention(
-        #     embed_dim, num_heads=num_heads, dropout=dropout, batch_first=True, bias=True
-        # )
-        self.mha = MultiHeadAttention(embed_dim, num_heads, rope=True, grid_shape=(7,7), geometric_base=100)
-
-    def forward(self, x):
-        """Forward pass through the Attention module.
-        :param:
-            x -> torch.Tensor: Input tensor
-        :return
-            attention_value  -> torch.Tensor: Output the value of the attention
-            attention_weight -> torch.Tensor: Output the weight of the attention
-        """
-        attention_value, attention_weight = self.mha(x, x, x)
-        return attention_value, attention_weight
-
-
-class TransformerEncoder(nn.Module):
-    def __init__(self, dim, depth, heads, mlp_dim, dropout=0.0):
-        """Initialize the Attention module.
-        :param:
-            dim       -> int : number of hidden dimension of attention
-            depth     -> int : number of layer for the transformer
-            heads     -> int : Number of heads
-            mlp_dim   -> int : number of hidden dimension for mlp
-            dropout   -> float : Dropout rate
-        """
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        PreNorm(dim, Attention(dim, heads, dropout=dropout)),
-                        PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout)),
-                    ]
-                )
-            )
-
-    def forward(self, x):
-        """Forward pass through the Attention module.
-        :param:
-            x -> torch.Tensor: Input tensor
-        :return
-            x -> torch.Tensor: Output of the Transformer
-            l_attn -> list(torch.Tensor): list of the attention
-        """
-        l_attn = []
-        for attn, ff in self.layers:
-            attention_value, attention_weight = attn(x)
-            x = attention_value + x
-            x = torch.clamp(x, torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
-            x = ff(x) + x
-            x = torch.clamp(x, torch.finfo(torch.float16).min, torch.finfo(torch.float16).max)
-            l_attn.append(attention_weight)
-        return x, l_attn
+# positional embedding enum
+class PositionalEmbedding(Enum):
+    learned = 1
+    sinusoidal = 2
+    rope = 3
 
 
 class MaskTransformer(nn.Module):
@@ -135,9 +25,14 @@ class MaskTransformer(nn.Module):
         mlp_dim=3072,
         dropout=0.1,
         dims=3,
-        learned_pos_emb=False,
-        tokens_per_sample=7**3
-        # nclass=1000,
+        positional_embedding="rope",
+        tokens_per_sample=7**3,
+        learnable_codebook=False,
+        predict_logits=False,
+        normalise_embeddings=False,
+        normalise_transformer_output=False,
+        remove_final_two_layers=False,
+        pass_through_tokens=False,
     ):
         """Initialize the Transformer model.
         :param:
@@ -155,21 +50,49 @@ class MaskTransformer(nn.Module):
         self.codebook_size = codebook_size
         self.mask_token = nn.Parameter(torch.randn((1, code_dim)))
         self.empty_token = nn.Parameter(torch.randn((1, code_dim)))
-        if learned_pos_emb:
+
+        self.learnable_codebook = learnable_codebook
+        self.predict_logits = predict_logits
+        self.normalise_embeddings = normalise_embeddings
+        self.normalise_transformer_output = normalise_transformer_output
+        if self.normalise_transformer_output and self.predict_logits:
+            raise ValueError(
+                "It does not make sense to normalize the transformer output and predict logits at the same time. It equates to arbitrary temperature scaling."
+            )
+        if self.normalise_transformer_output and not self.normalise_embeddings:
+            raise ValueError(
+                "If you want to normalize the transformer output, you need to normalize the embeddings as well."
+            )
+        self.pass_through_tokens = pass_through_tokens
+
+        self.positional_embedding = PositionalEmbedding[positional_embedding]
+
+        if self.positional_embedding == PositionalEmbedding.learned:
+            # Learned positional embedding
             self.pos_emb = nn.Parameter(
                 torch.zeros(1, self.tokens_per_sample, code_dim)
             )
             nn.init.trunc_normal_(self.pos_emb, 0.0, 0.02)
-        else:
+        elif self.positional_embedding == PositionalEmbedding.sinusoidal:
             pos_enc_dim = code_dim // 2
             pos_enc_rng = torch.linspace(0, 1, steps=pos_enc_dim)[None, :]
             pos_array = torch.arange(self.tokens_per_sample)[:, None].float()
-            sin_enc = torch.sin(pos_array / ((self.tokens_per_sample / torch.pi / 2) ** pos_enc_rng))
-            cos_enc = torch.cos(pos_array / ((self.tokens_per_sample / torch.pi / 2) ** pos_enc_rng))
+            sin_enc = torch.sin(
+                pos_array / ((self.tokens_per_sample / torch.pi / 2) ** pos_enc_rng)
+            )
+            cos_enc = torch.cos(
+                pos_array / ((self.tokens_per_sample / torch.pi / 2) ** pos_enc_rng)
+            )
 
             self.pos_emb = torch.stack([sin_enc, cos_enc], dim=-1).flatten(-2)[None]
-            self.pos_emb = torch.zeros_like(self.pos_emb)
-            self.pos_emb = nn.Parameter(self.pos_emb, requires_grad=False)
+            self.pos_emb = nn.Parameter(
+                self.pos_emb, requires_grad=False
+            )  # Changed to requires_grad=True
+        elif self.positional_embedding == PositionalEmbedding.rope:
+            # RoPE positional embedding
+            self.pos_emb = nn.Parameter(
+                torch.zeros(1, self.tokens_per_sample, code_dim), requires_grad=False
+            )
 
         # First layer before the Transformer block
         self.first_layer = nn.Sequential(
@@ -183,17 +106,29 @@ class MaskTransformer(nn.Module):
         )
 
         self.transformer = TransformerEncoder(
-            dim=hidden_dim, depth=depth, heads=heads, mlp_dim=mlp_dim, dropout=dropout
+            dim=hidden_dim,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+            rope=self.positional_embedding == PositionalEmbedding.rope,
         )
 
         # Last layer after the Transformer block
-        self.last_layer = nn.Sequential(
+        final_dim = codebook_size + 2 if self.predict_logits else code_dim
+        last_layer = [
             nn.LayerNorm(hidden_dim, eps=1e-12),
             nn.Dropout(p=dropout),
-            nn.Linear(in_features=hidden_dim, out_features=code_dim),
-            nn.GELU(),
-            nn.LayerNorm(code_dim, eps=1e-12),
-        )
+            # nn.Linear(in_features=hidden_dim, out_features=code_dim),
+            nn.Linear(in_features=hidden_dim, out_features=final_dim),
+            # nn.GELU(),
+            # # nn.LayerNorm(code_dim, eps=1e-12),
+            # nn.LayerNorm(final_dim, eps=1e-12),
+        ]
+        if not remove_final_two_layers:
+            last_layer.append(nn.GELU())
+            last_layer.append(nn.LayerNorm(final_dim, eps=1e-12))
+        self.last_layer = nn.Sequential(*last_layer)
 
         # Bias for the last linear output
         self.bias = nn.Parameter(
@@ -212,7 +147,11 @@ class MaskTransformer(nn.Module):
         """
         if self.codebook.device != self.mask_token.device:
             self.codebook = self.codebook.to(self.mask_token.device)
-        return torch.cat([self.codebook, self.mask_token, self.empty_token], 0)
+
+        cb = torch.cat([self.codebook, self.mask_token, self.empty_token], 0)
+        if self.normalise_embeddings:
+            cb = cb / (cb.norm(dim=-1, keepdim=True) + 1e-6)
+        return cb
 
     def tok_emb(self, x):
         """Embedding function for the tokens.
@@ -231,11 +170,10 @@ class MaskTransformer(nn.Module):
         """
         codebook = np.load(codebook_path)
         self.codebook = torch.from_numpy(codebook).float()
-        # self.tok_emb.weight.data[:-2] = codebook  # keep space for mask token
-        # # freeze all but the last row of the codebook
-        # self.tok_emb.weight.requires_grad = True
-        # with torch.no_grad():
-        #     self.tok_emb.weight[:-2].requires_grad_(False)
+
+        self.codebook = torch.nn.Parameter(
+            self.codebook, requires_grad=self.learnable_codebook
+        )
 
     def forward(self, img_token, return_attn=False):
         """Forward.
@@ -260,9 +198,21 @@ class MaskTransformer(nn.Module):
         x, attn = self.transformer(x)
         x = self.last_layer(x)
 
-        logit = (
-            torch.matmul(x, self.tok_emb_weight().T) + self.bias
-        )  # Shared layer with the embedding
+        if self.pass_through_tokens:
+            # x = x + (tok_embeddings - x).detach()
+            x = tok_embeddings
+
+        if self.normalise_transformer_output:
+            x = x / (x.norm(dim=-1, keepdim=True) + 1e-6)
+
+        if self.predict_logits:
+            logit = x
+        else:
+            output_embed = self.tok_emb_weight().T
+            logit = (
+                torch.matmul(x, output_embed)
+                # + self.bias
+            )  # Shared layer with the embedding
 
         if return_attn:  # return list of attention
             return (

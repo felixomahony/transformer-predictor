@@ -11,9 +11,9 @@ from sklearn.decomposition import PCA
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import pytorch_lightning as pl
-import matplotlib.pyplot as plt
 
 from Network.transformer import MaskTransformer
 from Data import GS_Dataset
@@ -41,17 +41,16 @@ class MaskGIT(pl.LightningModule):
             "square": lambda r: 1 - (r**2),
             "cosine": lambda r: torch.cos(r * math.pi * 0.5),
             "arccos": lambda r: torch.arccos(r) / (math.pi * 0.5),
+            "none": lambda r: torch.zeros_like(r),
         }
 
     def get_network(
         self,
-        tokens_per_sample,
-        codebook_size,
-        code_dim=768,
-        depth=24,
-        heads=16,
-        mlp_dim=3072,
-        dropout=0.1,
+        mask_value=1000,
+        empty_value=1001,
+        r_temp=4.5,
+        sm_temp=1.0,
+        sched_mode="arccos",
         **kwargs,
     ):
         """return the network, load checkpoint if self.args.resume == True
@@ -61,26 +60,8 @@ class MaskGIT(pl.LightningModule):
             model -> nn.Module: the network
         """
         model = MaskTransformer(
-            code_dim=code_dim,
-            codebook_size=codebook_size,
-            depth=depth,
-            heads=heads,
-            mlp_dim=mlp_dim,
-            dropout=dropout,  # Small
-            tokens_per_sample=tokens_per_sample,
+            **kwargs,
         )
-
-        if self.args.run.resume:
-            ckpt = self.args.vit.vit_folder
-            ckpt += "current.pth" if os.path.isdir(self.args.vit.vit_folder) else ""
-            print("load ckpt from:", ckpt)
-            # Read checkpoint file
-            checkpoint = torch.load(ckpt, map_location="cpu")
-            # Update the current epoch and iteration
-            # self.args.iter += checkpoint["iter"]
-            # self.args.global_epoch += checkpoint["global_epoch"]
-            # Load network
-            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
         if self.args.vqvae.codebook_path != "":
             model.load_codebook(self.args.vqvae.codebook_path)
@@ -144,37 +125,52 @@ class MaskGIT(pl.LightningModule):
          loss -> float: the loss value
         """
         loss_dict = {}
+        loss = 0
+
         # Cross-entropy loss
-        ce_loss = self.criterion(
+        ce_loss = F.cross_entropy(
             pred.reshape(-1, self.args.vqvae.codebook_n + 2), code.view(-1)
         )
-        loss_dict["ce_loss"] = ce_loss
-        loss = ce_loss
+        loss_dict["ce_loss"] = ce_loss.item()
+        if self.args.learning.lambda_ce > 0:
+            loss += ce_loss * self.args.learning.lambda_ce
 
-        if self.args.learning.emptiness_loss:
-            code_empty = (
-                torch.maximum(
-                    code,
-                    torch.tensor([self.args.vqvae.codebook_n - 1], device=code.device),
-                )
-                - self.args.vqvae.codebook_n
-                + 1
+        # filled loss
+        filled_loss = F.cross_entropy(
+            pred.reshape(-1, self.args.vqvae.codebook_n + 2),
+            code.view(-1),
+            ignore_index=self.args.vit.empty_value,
+        )
+        loss_dict["filled_loss"] = filled_loss.item()
+        if self.args.learning.lambda_filled > 0:
+            loss += filled_loss * self.args.learning.lambda_filled
+
+        # emptiness loss
+        code_empty = (
+            torch.maximum(
+                code,
+                torch.tensor([self.args.vqvae.codebook_n - 1], device=code.device),
             )
+            - self.args.vqvae.codebook_n
+            + 1
+        )
 
-            pred_probs = torch.softmax(pred, dim=-1)
-            pred_empty = torch.zeros_like(pred[..., :3])
-            pred_empty[:, :, -2:] = pred_probs[:, :, -2:]
-            pred_empty[:, :, 0] = torch.sum(pred_probs[:, :, :-2], dim=-1)
-            # invert softmax
-            pred_empty = torch.log(pred_empty + 1e-8)
-            emptiness_loss = self.criterion(
-                pred_empty.reshape(-1, 3),
-                code_empty.view(-1),
-            )
-            loss_dict["emptiness_loss"] = emptiness_loss
-            loss += emptiness_loss
+        pred_probs = torch.softmax(pred, dim=-1)
+        pred_empty = pred_probs[..., -2:]
+        pred_filled = torch.sum(pred_probs[:, :, :-2], dim=-1, keepdim=True)
+        pred_e_f = torch.cat([pred_filled, pred_empty], dim=-1)
 
-        loss_dict["loss_total"] = loss
+        logits_e_f = torch.log(pred_e_f + 1e-5)
+
+        emptiness_loss = F.cross_entropy(
+            logits_e_f.reshape(-1, 3),
+            code_empty.view(-1),
+        )
+        if self.args.learning.lambda_empty > 0:
+            loss_dict["emptiness_loss"] = emptiness_loss.item()
+            loss += emptiness_loss * self.args.learning.lambda_empty
+
+        loss_dict["loss_total"] = loss.item()
         return loss, loss_dict
 
     def training_step(self, batch, batch_idx):
@@ -184,6 +180,7 @@ class MaskGIT(pl.LightningModule):
         # Mask the encoded tokens
         masked_code, _ = self.get_mask_code(
             code,
+            mode=self.args.learning.sched_mode_learning,
             value=self.args.vit.mask_value,
             codebook_size=self.args.vqvae.codebook_n,
         )
@@ -208,6 +205,7 @@ class MaskGIT(pl.LightningModule):
         # Mask the encoded tokens
         masked_code, _ = self.get_mask_code(
             code,
+            mode=self.args.learning.sched_mode_learning,
             value=self.args.vit.mask_value,
             codebook_size=self.args.vqvae.codebook_n,
         )
@@ -218,7 +216,12 @@ class MaskGIT(pl.LightningModule):
             loss, loss_dict = self.calc_loss(pred, code)
 
         self.log_all(train=False, loss_dict=loss_dict)
-        return loss
+        return {
+            "loss": loss,
+            "input_code": code,
+            "masked_code": masked_code,
+            "pred_code": pred,
+        }
 
     def log_all(self, train, loss_dict):
         prefix = "train" if train else "val"

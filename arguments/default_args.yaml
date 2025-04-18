@@ -1,5 +1,6 @@
 run:
   resume: false
+  resume_path: false
   test_only: false
   seed: 42
 logging:
@@ -11,20 +12,28 @@ trainer:
   log_every_n_steps: 100
   accelerator: "cuda"
 learning:
-  lr: 0.01
-  emptiness_loss: true
+  lr: 0.0001
+  sched_mode_learning: "arccos"
+  lambda_ce: 1.0
+  lambda_empty: 1.0
+  lambda_filled: 0.0
 vit:
-  vit_folder: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/maskgit_2d_full/"
   depth: 24
   heads: 16
   mlp_dim: 3072
   dropout: 0.1
-  step: 8
   mask_value: 1000
   empty_value: 1001
   r_temp: 4.5
   sm_temp: 1.0
   sched_mode: "arccos"
+  learnable_codebook: false
+  predict_logits: false
+  normalise_embeddings: false
+  normalise_transformer_output: false
+  pass_through_tokens: false
+  remove_final_two_layers: false
+  positional_embedding: "rope" # learned | sinusoidal | rope
 vqvae:
   codebook_path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook.npy"
   codebook_n: 1000

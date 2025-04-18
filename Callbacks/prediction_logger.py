@@ -1,7 +1,9 @@
 import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_only
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import torch
+import numpy as np
 
 from sklearn.decomposition import PCA
 
@@ -10,6 +12,10 @@ class PredictionLogger(pl.Callback):
     def __init__(self, log_every_n_steps=50):
         super().__init__()
         self.log_every_n_steps = log_every_n_steps
+
+    @rank_zero_only
+    def on_train_epoch_end(self, trainer, pl_module):
+        plt.close("all")
 
     @rank_zero_only
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
@@ -25,58 +31,68 @@ class PredictionLogger(pl.Callback):
                 global_step=trainer.global_step,
             )
 
-            plt.close(fig)  # Close the figure to free memory
+            plt.close(fig)
 
     def _generate_figure(self, outputs, mask_token, empty_token):
         # Your expensive figure generation code goes here
         # This is just a placeholder example
-        fig, ax = plt.subplots(1, 3)
+        fig, ax = plt.subplots(1, 3, figsize=(9, 3))
 
         assert "input_code" in outputs
         assert "pred_code" in outputs
         assert "masked_code" in outputs
 
-        def replace_mask_empty(tokens):
-            tokens_8 = tokens % 8
-            tokens_8[tokens == mask_token] = 8
-            tokens_8[tokens == empty_token] = 9
-            return tokens_8
+        assert (
+            empty_token == mask_token + 1
+        ), "mask_token should be empty_token - 1 for this implementation"
+
+        rainbow_cmap = plt.cm.rainbow
+        colors = np.vstack(
+            (
+                rainbow_cmap(np.linspace(0, 1, mask_token)),
+                np.array([[0, 0, 0, 1]]),
+                np.array([[1, 1, 1, 1]]),
+            )
+        )
+        custom_cmap = mcolors.ListedColormap(colors)
 
         ax_input = ax[0]
         ax_input.imshow(
-            replace_mask_empty(outputs["input_code"][0])
-            .view(-1, 7)
-            .detach()
-            .cpu()
-            .numpy(),
-            cmap="tab10",
+            outputs["input_code"][0].view(-1, 7).detach().cpu().numpy(),
+            cmap=custom_cmap,
             vmin=0,
-            vmax=9,
+            vmax=empty_token,
         )
-        ax_input.axis("off")
 
         ax_mask = ax[1]
         ax_mask.imshow(
-            replace_mask_empty(outputs["masked_code"][0])
+            outputs["masked_code"][0].view(-1, 7).detach().cpu().numpy(),
+            cmap=custom_cmap,
+            vmin=0,
+            vmax=empty_token,
+        )
+
+        ax_pred = ax[2]
+        pred = (
+            torch.argmax(outputs["pred_code"][0], dim=1)
             .view(-1, 7)
             .detach()
             .cpu()
-            .numpy(),
-            cmap="tab10",
-            vmin=0,
-            vmax=9,
+            .numpy()
         )
-        ax_mask.axis("off")
-
-        ax_pred = ax[2]
-        pred = torch.argmax(outputs["pred_code"][0], dim=1)
         ax_pred.imshow(
-            replace_mask_empty(pred).view(-1, 7).detach().cpu().numpy(),
-            cmap="tab10",
+            pred,
+            cmap=custom_cmap,
             vmin=0,
-            vmax=9,
+            vmax=empty_token,
         )
-        ax_pred.axis("off")
+
+        ax_input.set_xticks([])
+        ax_input.set_yticks([])
+        ax_mask.set_xticks([])
+        ax_mask.set_yticks([])
+        ax_pred.set_xticks([])
+        ax_pred.set_yticks([])
 
         ax_input.set_title("Input Code")
         ax_mask.set_title("Masked Code")
