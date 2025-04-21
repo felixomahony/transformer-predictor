@@ -136,9 +136,12 @@ class MaskGIT(pl.LightningModule):
             loss += ce_loss * self.args.learning.lambda_ce
 
         # filled loss
+        pred_reshaped = pred.reshape(-1, self.args.vqvae.codebook_n + 2)
+        code_reshaped = code.view(-1)
+        empty_mask = code_reshaped != self.args.vit.empty_value
         filled_loss = F.cross_entropy(
-            pred.reshape(-1, self.args.vqvae.codebook_n + 2),
-            code.view(-1),
+            pred_reshaped[empty_mask],
+            code_reshaped[empty_mask],
             ignore_index=self.args.vit.empty_value,
         )
         loss_dict["filled_loss"] = filled_loss.item()
@@ -166,8 +169,8 @@ class MaskGIT(pl.LightningModule):
             logits_e_f.reshape(-1, 3),
             code_empty.view(-1),
         )
+        loss_dict["emptiness_loss"] = emptiness_loss.item()
         if self.args.learning.lambda_empty > 0:
-            loss_dict["emptiness_loss"] = emptiness_loss.item()
             loss += emptiness_loss * self.args.learning.lambda_empty
 
         loss_dict["loss_total"] = loss.item()
