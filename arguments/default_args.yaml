@@ -1,47 +1,44 @@
-run:
-  resume: false
-  resume_path: false
-  test_only: false
-  seed: 42
-logging:
-  save_dir: "lightning_logs"
-  name: "untitled"
-  version: "0"
-trainer:
-  max_epochs: 10
-  log_every_n_steps: 100
-  accelerator: "cuda"
-learning:
-  lr: 0.0001
-  sched_mode_learning: "arccos"
-  lambda_ce: 1.0
-  lambda_empty: 1.0
-  lambda_filled: 0.0
-vit:
-  depth: 24
-  heads: 16
-  mlp_dim: 3072
-  dropout: 0.1
-  mask_value: 1000
-  empty_value: 1001
-  r_temp: 4.5
-  sm_temp: 1.0
-  sched_mode: "arccos"
-  learnable_codebook: false
-  predict_logits: false
-  normalise_embeddings: false
-  normalise_transformer_output: false
-  pass_through_tokens: false
-  remove_final_two_layers: false
+run: # relating to the pytorch lightning
+  resume: false # whether to resume training from a checkpoint
+  resume_path: false # if resume, the path to the .ckpt file
+  test_only: false # only run the evaluation() method for a trained checkpoint
+  seed: 42 # random seed
+logging: # relating to tensorboard logger
+  save_dir: "lightning_logs" # path to logging folder
+  name: "untitled" # subdirectory within logging folder
+  version: "0" # subdirectory within name folder
+trainer: # relating to pytorch trainer module
+  max_epochs: 10 # maximum number of epochs to run
+  log_every_n_steps: 100 # logging frequency
+  accelerator: "cuda" # cpu | cuda | mps
+learning: # relating to training of model
+  lr: 0.0001 # learning rate
+  sched_mode_learning: "arccos" # this refers to the schedule of masking tokens, not the learning rate scheduler
+  lambda_ce: 1.0 # loss = lambda_ce * loss_ce + ...
+  lambda_empty: 1.0 # loss = lambda_empty * loss_empty + ...
+  lambda_filled: 0.0 # loss = lambda_filled * loss_filled + ...
+vit: # relating to vision transformer configuration
+  depth: 24 # number of attention/ff layers
+  heads: 16 # number of heads within each self attention module
+  mlp_dim: 3072 # mlp dimension at input and output of model
+  dropout: 0.1 # dropout ratio
+  mask_value: 1000 # index of token to use as the mask value (should be = codebook_size)
+  empty_value: 1001 # index of token to use to represent empty space (should be = codebook_size+1)
+  learnable_codebook: false # whether codebook should be a trainable parameter
+  predict_logits: false # whether to predict logits directly or whether to predict a vector
+  normalise_embeddings: false # whether to normalise the codebook and the mask and empty tokens before input to transformer
+  normalise_transformer_output: false # whether to normalise output of transformer before similarity scoring
+  pass_through_tokens: false # whether to ignore the transformer and pass tokens directly from input to output
+  remove_final_two_layers: false # whether to remove the final two layers (GELU and layer norm) from the transformer
   positional_embedding: "rope" # learned | sinusoidal | rope
-vqvae:
-  codebook_path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook.npy"
-  codebook_n: 1000
-  hidden_dim: 4
-data:
+vqvae: # relating to the source of the tokens
+  codebook_path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook.npy" # path to codebook
+  codebook_n: 1000 # number of tokens
+  hidden_dim: 4 # dimensionality of each token
+data: # relating to data module and data loader
   batch_size: 64
   num_workers: 8
-  path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook_indices/"
-  temporal: false
-  conditionalise_dim: 2
-  spatial_size: 7
+  path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/four_compression/bp_64/codebook_indices/" # path to files containing sparse token locations
+  temporal: false # whether data carry temporal dimension
+  conditionalise_dim: 2 # whether to conditionalise 3d data along one dimension. Set to -1 if no conditionalising
+  spatial_size: 7 # spatial size of each token set
