@@ -27,8 +27,11 @@ class MaskGIT(pl.LightningModule):
         self.args = args
 
         self.tokens_per_sample = GS_Dataset.datum_size(**args.data.ka)
+        self.datum_shape = GS_Dataset.datum_shape(**args.data.ka)
+        self.frame_masking_frac = args.learning.frame_masking_frac
         self.vit = self.get_network(
             tokens_per_sample=self.tokens_per_sample,
+            grid_shape=self.datum_shape,
             codebook_size=self.args.vqvae.codebook_n,
             code_dim=self.args.vqvae.hidden_dim,
             **self.args.vit.ka,
@@ -72,12 +75,15 @@ class MaskGIT(pl.LightningModule):
 
         return model
 
-    def get_mask_code(self, code, mode="arccos", value=None, codebook_size=256):
+    def get_mask_code(
+        self, code, mode="arccos", value=None, codebook_size=256, frame_masking_frac=0.0
+    ):
         """Replace the code token by *value* according the the *mode* scheduler
         :param
          code  -> torch.LongTensor(): bsize * 16 * 16, the unmasked code
          mode  -> str:                the rate of value to mask
          value -> int:                mask the code by the value
+         frame_masking -> bool: fraction of samples where frame masking should be used
         :return
          masked_code -> torch.LongTensor(): bsize * 16 * 16, the masked version of the code
          mask        -> torch.LongTensor(): bsize * 16 * 16, the binary mask of the mask
@@ -89,6 +95,18 @@ class MaskGIT(pl.LightningModule):
         # Sample the amount of tokens + localization to mask
         extended_shape = [code.size(0)] + [1] * (len(code.size()) - 1)
         mask = torch.rand(size=code.size()) < val_to_mask.view(*extended_shape)
+
+        if frame_masking_frac > 0.0:
+            r_frame = torch.rand([code.size(0), self.datum_shape[0]])
+            mask_frame = r_frame < val_to_mask[:, None]
+            mask_frame = (
+                mask_frame[..., None, None, None]
+                .repeat(1, 1, *self.datum_shape[1:])
+                .view(code.size(0), -1)
+            )
+
+            use_frame_masking = torch.rand(code.size(0)) < frame_masking_frac
+            mask[use_frame_masking] = mask_frame[use_frame_masking]
 
         if value > 0:  # Mask the selected token by the value
             mask_code[mask] = torch.full_like(mask_code[mask], value)
@@ -186,12 +204,37 @@ class MaskGIT(pl.LightningModule):
             mode=self.args.learning.sched_mode_learning,
             value=self.args.vit.mask_value,
             codebook_size=self.args.vqvae.codebook_n,
+            frame_masking_frac=self.frame_masking_frac,
         )
 
         with torch.amp.autocast("cuda"):  # half precision
             pred = self.vit(masked_code)
             # Cross-entropy loss
             loss, loss_dict = self.calc_loss(pred, code)
+
+        # # Debug: Check which parameters have gradients after backward
+        # if batch_idx == 0:  # Only check first batch to avoid spam
+        #     loss.backward(retain_graph=True)
+
+        #     unused_params = []
+        #     used_params = []
+
+        #     for name, param in self.named_parameters():
+        #         if param.grad is None:
+        #             unused_params.append(name)
+        #         else:
+        #             used_params.append(name)
+
+        #     if unused_params:
+        #         print("UNUSED PARAMETERS:")
+        #         for name in unused_params:
+        #             print(f"  - {name}")
+        #     raise ValueError("stop")
+
+        #     # Clear gradients for normal training
+        #     self.zero_grad()
+
+        # return loss
 
         self.log_all(train=True, loss_dict=loss_dict)
         return {
@@ -229,7 +272,13 @@ class MaskGIT(pl.LightningModule):
     def log_all(self, train, loss_dict):
         prefix = "train" if train else "val"
         for k, v in loss_dict.items():
-            self.log(f"{prefix}/{k}", v, prog_bar=k == "loss_total", logger=True)
+            self.log(
+                f"{prefix}/{k}",
+                v,
+                prog_bar=k == "loss_total",
+                logger=True,
+                sync_dist=True,
+            )
 
     def sample(
         self,
@@ -274,14 +323,14 @@ class MaskGIT(pl.LightningModule):
                         0,
                         self.args.vqvae.codebook_n,
                         (nb_sample, self.tokens_per_sample),
-                    ).to(self.args.run.device)
+                    ).to(self.args.trainer.accelerator)
                 else:  # Code initialize with masked tokens
                     code = torch.full(
                         (nb_sample, self.tokens_per_sample),
                         self.args.vit.mask_value,
-                    ).to(self.args.run.device)
+                    ).to(self.args.trainer.accelerator)
                 mask = torch.ones(nb_sample, self.tokens_per_sample).to(
-                    self.args.run.device
+                    self.args.trainer.accelerator
                 )
 
             # Instantiate scheduler
@@ -334,7 +383,7 @@ class MaskGIT(pl.LightningModule):
                         * (1 - ratio)
                     )
                     conf = torch.log(conf.squeeze()) + torch.from_numpy(rand).to(
-                        self.args.run.device
+                        self.args.trainer.accelerator
                     )
                 elif (
                     randomize == "warm_up"

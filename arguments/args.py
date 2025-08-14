@@ -5,7 +5,7 @@ import os
 
 
 class Args:
-    def __init__(self, default_args_path: str, args):
+    def __init__(self, default_args_path: str, args=None):
         self.parser = ArgumentParser()
 
         # open yaml file
@@ -21,13 +21,16 @@ class Args:
         self.parser.add_argument(
             "--config", type=str, help="Path to the config file", required=False
         )
-        self.args = self.parser.parse_args(args)
-
-        if hasattr(self.args, "config") and self.args.config is not None:
-            config_path = self.args.config
-            with open(config_path, "r") as f:
-                config = yaml.safe_load(f)
+        if args is not None:
+            self.args = self.parser.parse_args(args)
+            if hasattr(self.args, "config") and self.args.config is not None:
+                config_path = self.args.config
+                with open(config_path, "r") as f:
+                    config = yaml.safe_load(f)
+            else:
+                config = {}
         else:
+            self.args = None
             config = {}
 
         self.arg_dict_ = {}
@@ -35,7 +38,8 @@ class Args:
             class_level_dict = {}
             for arg_level in self.default_args[class_level]:
                 if (
-                    hasattr(self.args, arg_level)
+                    self.args is not None
+                    and hasattr(self.args, arg_level)
                     and getattr(self.args, arg_level) is not None
                 ):
                     class_level_dict[arg_level] = getattr(self.args, arg_level)

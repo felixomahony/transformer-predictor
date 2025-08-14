@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import numpy as np
 
 from Network.mdrope import MDRoPE
 
@@ -14,6 +15,8 @@ class MultiHeadAttention(nn.Module):
         grid_shape=None,
         geometric_base=100,
         dropout=0.0,
+        window_size=None,
+        window_attention=False,
     ):
         """
         Custom Multi-Head Attention implementation.
@@ -51,6 +54,16 @@ class MultiHeadAttention(nn.Module):
         self.attention_dropout = nn.Dropout(dropout)
         self.output_dropout = nn.Dropout(dropout)
 
+        if window_attention and window_size is not None:
+            indices = torch.tensor(np.indices(grid_shape)).flatten(1).T
+            distances = (
+                torch.abs(indices[:, None, :] - indices[None, :, :]) * 2
+            )  # 2 because the window size is applied in both directions
+            window = torch.tensor(window_size)
+            self.attention_mask = torch.all(distances < window[None, None, :], dim=-1)
+        else:
+            self.attention_mask = None
+
     def forward(self, x_q, x_k, x_v, mask=None):
         """
         Forward pass for multi-head attention.
@@ -85,31 +98,54 @@ class MultiHeadAttention(nn.Module):
             query = self.rope(query)
             key = self.rope(key)
 
-        # Compute attention scores
-        # [B, H, N, D] @ [B, H, D, N] -> [B, H, N, N]
-        attention_scores = (query @ key.transpose(-2, -1)) / self.scale
-
-        # Apply mask if provided
-        if mask is not None:
+        if self.attention_mask is None:
+            # Compute attention scores
+            # [B, H, N, D] @ [B, H, D, N] -> [B, H, N, N]
+            attention_scores = (query @ key.transpose(-2, -1)) / self.scale
+            # Apply mask if provided
+            if mask is not None:
+                attention_scores = attention_scores.masked_fill(
+                    mask == 0, torch.finfo(torch.float16).min
+                )
+            # cut out any inf values
             attention_scores = attention_scores.masked_fill(
-                mask == 0, torch.finfo(torch.float16).min
+                attention_scores == float("-inf"), torch.finfo(torch.float16).min
             )
+            attention_scores = attention_scores.masked_fill(
+                attention_scores == float("inf"), torch.finfo(torch.float16).max
+            )
+            # Softmax attention scores
+            attention_probs = torch.softmax(attention_scores, dim=-1)
+            attention_probs = self.attention_dropout(attention_probs)
+            # Apply attention to values
+            # [B, H, N, N] @ [B, H, N, D] -> [B, H, N, D]
+            context = attention_probs @ value
+        else:
+            # we assume that we are using the mask to reduce memory, so computing the full matrix is inefficient
+            context_lst = []
+            kt = key.transpose(-2, -1)
+            for row in range(query.shape[-2]):
+                row_mask = self.attention_mask[row]
 
-        # cut out any inf values
-        attention_scores = attention_scores.masked_fill(
-            attention_scores == float("-inf"), torch.finfo(torch.float16).min
-        )
-        attention_scores = attention_scores.masked_fill(
-            attention_scores == float("inf"), torch.finfo(torch.float16).max
-        )
+                # [B, H, 1, N_m]
+                attention_scores = query[..., row : row + 1, :] @ kt[..., row_mask]
+                # cut out any inf values
+                attention_scores = attention_scores.masked_fill(
+                    attention_scores == float("-inf"), torch.finfo(torch.float16).min
+                )
+                attention_scores = attention_scores.masked_fill(
+                    attention_scores == float("inf"), torch.finfo(torch.float16).max
+                )
+                attention_probs = torch.softmax(attention_scores, dim=-1)
+                attention_probs = self.attention_dropout(attention_probs)
 
-        # Softmax attention scores
-        attention_probs = torch.softmax(attention_scores, dim=-1)
-        attention_probs = self.attention_dropout(attention_probs)
+                # [B, H, 1, N_m] @ [B, H, N_m, D] -> [B, H, 1, D]
+                context_elem = attention_probs @ value[..., row_mask, :]
 
-        # Apply attention to values
-        # [B, H, N, N] @ [B, H, N, D] -> [B, H, N, D]
-        context = attention_probs @ value
+                context_lst.append(context_elem)
+
+            # [B, H, N, D]
+            context = torch.cat(context_lst, dim=-2)
 
         # Reshape and combine heads
         context = (

@@ -5,14 +5,14 @@ run: # relating to the pytorch lightning
   seed: 42 # random seed
 logging: # relating to tensorboard logger
   save_dir: "lightning_logs" # path to logging folder
-  name: "untitled" # subdirectory within logging folder
-  version: "0" # subdirectory within name folder
+  name: "test" # subdirectory within logging folder
+  version: "test" # subdirectory within name folder
 trainer: # relating to pytorch trainer module
   max_epochs: 30 # maximum number of epochs to run
   log_every_n_steps: 100 # logging frequency
   accelerator: "cuda" # cpu | cuda | mps
 learning: # relating to training of model
-  lr: 0.0001 # learning rate
+  lr: 0.00001 # learning rate
   sched_mode_learning: "arccos" # this refers to the schedule of masking tokens, not the learning rate scheduler
   lambda_ce: 0.0 # loss = lambda_ce * loss_ce + ...
   lambda_empty: 1.0 # loss = lambda_empty * loss_empty + ...
@@ -32,19 +32,19 @@ vit: # relating to vision transformer configuration
   pass_through_tokens: false # whether to ignore the transformer and pass tokens directly from input to output
   remove_final_two_layers: false # whether to remove the final two layers (GELU and layer norm) from the transformer
   positional_embedding: "rope" # learned | sinusoidal | rope
-  split_spatio_temporal: false # whether to split the attention into spatial and temporal components
+  split_spatio_temporal: true # whether to split the attention into spatial and temporal components
   split_spatio: false
   window_attention: false
   window_size: [5, 5, 5]
 vqvae: # relating to the source of the tokens
-  codebook_path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/occupancy_test/test/codebook.npy" # path to codebook
+  codebook_path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/loss_experiment/l2_wu_rgb_10x_after/codebook.npy" # path to codebook
   codebook_n: 1024 # number of tokens
   hidden_dim: 4 # dimensionality of each token
 data: # relating to data module and data loader
-  batch_size: 8
+  batch_size: 3
   num_workers: 8
-  path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/occupancy_test/test/codebook_indices/" # path to files containing sparse token locations
-  temporal: false # whether data carry temporal dimension
+  path: "/scratch/foo22/Data/Physics_Simulation/intermediate_data/codebook/loss_experiment/l2_wu_rgb_10x_after/codebook_indices/" # path to files containing sparse token locations
+  temporal: true # whether data carry temporal dimension
   conditionalise_dim: -1 # whether to conditionalise 3d data along one dimension. Set to -1 if no conditionalising
   spatial_size: 8 # spatial size of each token set
-  temporal_window: 4
+  temporal_window: 4 # size of temporal window

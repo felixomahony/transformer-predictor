@@ -45,16 +45,15 @@ class GS_Dataset(torch.utils.data.Dataset):
         )
 
         n_scenes_tot = len(os.listdir(path))
-        n_scenes_train = int(n_scenes_tot * split)
+        n_scenes_train = max(int(n_scenes_tot * split), 1)
+        n_scenes_val = max(int(n_scenes_tot * (1 - split)), 1)
         if train:
             self.scenes = range(n_scenes_train)
         else:
-            self.scenes = range(n_scenes_train, n_scenes_tot)
+            self.scenes = range(n_scenes_tot - n_scenes_val, n_scenes_tot)
 
     def load_sf(self, scene, frame, slce=None):
-        path = os.path.join(
-            self.path, f"scene_{scene:04d}", f"frame_{frame:04d}.npz"
-        )
+        path = os.path.join(self.path, f"scene_{scene:04d}", f"frame_{frame:04d}.npz")
         data = np.load(path)
         spatial_locations = data["spatial_locations"]
         codebook_indices = data["features"]
@@ -96,22 +95,45 @@ class GS_Dataset(torch.utils.data.Dataset):
             return len(self.scenes) * self.temporal_size * self.spatial_multiplier_
 
     @staticmethod
-    def datum_size(**kwargs):
-        ds = kwargs["spatial_size"] ** (3 if kwargs["conditionalise_dim"] is None else 2)
+    def datum_shape(**kwargs):
+        shape = [kwargs["spatial_size"]] * (
+            3
+            if (
+                kwargs["conditionalise_dim"] is None
+                or kwargs["conditionalise_dim"] == -1
+            )
+            else 2
+        )
         if kwargs["temporal"]:
-            ds *=kwargs["temporal_window"]
+            shape = [kwargs["temporal_window"]] + shape
+        return tuple(shape)
+
+    @staticmethod
+    def datum_size(**kwargs):
+        ds = kwargs["spatial_size"] ** (
+            3
+            if (
+                kwargs["conditionalise_dim"] is None
+                or kwargs["conditionalise_dim"] == -1
+            )
+            else 2
+        )
+        if kwargs["temporal"]:
+            ds *= kwargs["temporal_window"]
         return ds
 
     def __getitem__(self, idx):
         if self.temporal:
             slce = idx % self.spatial_multiplier_
             idx //= self.spatial_multiplier_
-            scene = self.scenes[idx]
+            scene_idx = idx // (self.temporal_size - self.temporal_window + 1)
+            scene = self.scenes[scene_idx]
+            frame = idx % (self.temporal_size - self.temporal_window + 1)
             retval = [
-                self.load_sf(scene, frame, slce)
-                for frame in range(self.temporal_window)
+                self.load_sf(scene, frame + df, slce)
+                for df in range(self.temporal_window)
             ]
-            retval = np.stack(retval)
+            retval = np.stack(retval).flatten()
             return retval
         else:
             slce = idx % self.spatial_multiplier_

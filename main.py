@@ -7,6 +7,7 @@ import torch
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
+import pytorch_lightning as pl
 
 from Trainer.maskgit import MaskGIT
 from arguments.args import Args
@@ -14,18 +15,18 @@ from Data import GS_DataModule
 from Callbacks.codebook_logger import CodebookLogger
 from Callbacks.prediction_logger import PredictionLogger
 from Callbacks.straight_through_accuracy import StraightThroughAccuracy
+from Callbacks.accuracy import Accuracy
+
+from flx_utils import FlxArgs
 
 
 def main(args):
-    a = Args("./arguments/default_args.yaml", args)
-    a.save()
+    # TODO: Remove
+    a = FlxArgs("./arguments/4d_args.yaml", args)
+
+    pl.seed_everything(a.run.seed)
 
     if a.run.seed > 0:  # Set the seed for reproducibility
-        seed = a.run.seed
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        np.random.seed(seed)
-        random.seed(seed)
         torch.backends.cudnn.enable = False
         torch.backends.cudnn.deterministic = True
 
@@ -51,6 +52,9 @@ def main(args):
     else:  # Begin training
         logger = TensorBoardLogger(**a.logging.ka)
         trainer = Trainer(
+            devices=3,
+            sync_batchnorm=True,
+            strategy="ddp",
             **a.trainer.ka,
             logger=logger,
             callbacks=[
@@ -65,6 +69,7 @@ def main(args):
                 CodebookLogger(log_every_n_steps=a.trainer.log_every_n_steps),
                 PredictionLogger(log_every_n_steps=a.trainer.log_every_n_steps),
                 StraightThroughAccuracy(),
+                Accuracy(),
             ],
         )
         trainer.fit(maskgit, data_module)

@@ -57,7 +57,18 @@ class FeedForward(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, embed_dim, num_heads, dropout=0.0, rope=False):
+    def __init__(
+        self,
+        embed_dim,
+        num_heads,
+        grid_shape,
+        dropout=0.0,
+        rope=False,
+        split_spatio_temporal=False,
+        split_spatio=False,
+        window_attention=False,
+        window_size=None,
+    ):
         """Initialize the Attention module.
         :param:
             embed_dim     -> int : Dimension of the embedding
@@ -66,17 +77,59 @@ class Attention(nn.Module):
         """
         super(Attention, self).__init__()
         self.dim = embed_dim
-        # self.mha = nn.MultiheadAttention(
-        #     embed_dim, num_heads=num_heads, dropout=dropout, batch_first=True, bias=True
-        # )
-        self.mha = MultiHeadAttention(
-            embed_dim,
-            num_heads,
-            rope=rope,
-            grid_shape=(7, 7),
-            geometric_base=100,
-            dropout=dropout,
-        )
+        self.split_spatio = split_spatio
+        self.split_spatio_temporal = split_spatio_temporal
+        self.grid_shape = grid_shape
+
+        if split_spatio:
+            self.mha_split = torch.nn.ModuleList(
+                [
+                    MultiHeadAttention(
+                        embed_dim,
+                        num_heads,
+                        rope=rope,
+                        grid_shape=grid_shape[i : i + 1],
+                        geometric_base=100,
+                        dropout=dropout,
+                        window_attention=window_attention,
+                        window_size=window_size,
+                    )
+                    for i in range(len(grid_shape))
+                ]
+            )
+        elif split_spatio_temporal:
+            assert len(grid_shape) == 4
+            self.mha_spatio = MultiHeadAttention(
+                embed_dim,
+                num_heads,
+                rope=rope,
+                grid_shape=grid_shape[-3:],
+                geometric_base=100,
+                dropout=dropout,
+                window_attention=window_attention,
+                window_size=window_size,
+            )
+            self.mha_temporal = MultiHeadAttention(
+                embed_dim,
+                num_heads,
+                rope=rope,
+                grid_shape=[grid_shape[0]],
+                geometric_base=100,
+                dropout=dropout,
+                window_attention=window_attention,
+                window_size=window_size,
+            )
+        else:
+            self.mha = MultiHeadAttention(
+                embed_dim,
+                num_heads,
+                rope=rope,
+                grid_shape=grid_shape,
+                geometric_base=100,
+                dropout=dropout,
+                window_attention=window_attention,
+                window_size=window_size,
+            )
 
     def forward(self, x):
         """Forward pass through the Attention module.
@@ -86,12 +139,73 @@ class Attention(nn.Module):
             attention_value  -> torch.Tensor: Output the value of the attention
             attention_weight -> torch.Tensor: Output the weight of the attention
         """
-        attention_value, attention_weight = self.mha(x, x, x)
+        if self.split_spatio:
+            b, s, f = x.shape
+            x = x.view(b, *self.grid_shape, f)
+            for i in range(len(self.grid_shape)):
+                x = torch.transpose(x, i + 1, -2)
+                shape = x.shape
+                x = x.reshape(-1, self.grid_shape[i], f)
+                x, attention_weight = self.mha_split[i](x, x, x)
+                x = x.reshape(*shape)
+                x = torch.transpose(x, i + 1, -2)
+            attention_value = x.reshape(b, s, f)
+        elif self.split_spatio_temporal:
+            b = x.shape[0]
+            t = self.grid_shape[0]
+            s = x.shape[1] // t
+            f = x.shape[2]
+
+            x_spatial = x.view(
+                b * t,
+                s,
+                f,
+            )
+            a_v, a_w = self.mha_spatio(x_spatial, x_spatial, x_spatial)
+            f = a_v.shape[2]
+
+            x_temporal = (
+                a_v.view(
+                    b,
+                    t,
+                    s,
+                    f,
+                )
+                .permute(0, 2, 1, 3)
+                .reshape(
+                    b * s,
+                    t,
+                    f,
+                )
+            )
+            attention_value, attention_weight = self.mha_temporal(
+                x_temporal, x_temporal, x_temporal
+            )
+            attention_value = (
+                attention_value.reshape(b, s, t, -1)
+                .permute(0, 2, 1, 3)
+                .reshape(b, t * s, -1)
+            )
+        else:
+            attention_value, attention_weight = self.mha(x, x, x)
         return attention_value, attention_weight
 
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, dim, depth, heads, mlp_dim, dropout=0.0, rope=False):
+    def __init__(
+        self,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        grid_shape,
+        dropout=0.0,
+        rope=False,
+        split_spatio_temporal=False,
+        split_spatio=False,
+        window_attention=False,
+        window_size=None,
+    ):
         """Initialize the Attention module.
         :param:
             dim       -> int : number of hidden dimension of attention
@@ -106,7 +220,20 @@ class TransformerEncoder(nn.Module):
             self.layers.append(
                 nn.ModuleList(
                     [
-                        PreNorm(dim, Attention(dim, heads, dropout=dropout, rope=rope)),
+                        PreNorm(
+                            dim,
+                            Attention(
+                                dim,
+                                heads,
+                                grid_shape,
+                                dropout=dropout,
+                                rope=rope,
+                                split_spatio_temporal=split_spatio_temporal,
+                                split_spatio=split_spatio,
+                                window_attention=window_attention,
+                                window_size=window_size,
+                            ),
+                        ),
                         PreNorm(dim, FeedForward(dim, mlp_dim, dropout=dropout)),
                     ]
                 )

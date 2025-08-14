@@ -36,7 +36,9 @@ class PredictionLogger(pl.Callback):
     def _generate_figure(self, outputs, mask_token, empty_token):
         # Your expensive figure generation code goes here
         # This is just a placeholder example
-        fig, ax = plt.subplots(1, 3, figsize=(9, 3))
+        fig, ax = plt.subplots(
+            1, 3, figsize=(9, 3 * torch.numel(outputs["input_code"][0]) // 64)
+        )
 
         assert "input_code" in outputs
         assert "pred_code" in outputs
@@ -58,7 +60,7 @@ class PredictionLogger(pl.Callback):
 
         ax_input = ax[0]
         ax_input.imshow(
-            outputs["input_code"][0].view(-1, 7).detach().cpu().numpy(),
+            outputs["input_code"][0].view(-1, 8).detach().cpu().numpy(),
             cmap=custom_cmap,
             vmin=0,
             vmax=empty_token,
@@ -66,7 +68,7 @@ class PredictionLogger(pl.Callback):
 
         ax_mask = ax[1]
         ax_mask.imshow(
-            outputs["masked_code"][0].view(-1, 7).detach().cpu().numpy(),
+            outputs["masked_code"][0].view(-1, 8).detach().cpu().numpy(),
             cmap=custom_cmap,
             vmin=0,
             vmax=empty_token,
@@ -75,7 +77,7 @@ class PredictionLogger(pl.Callback):
         ax_pred = ax[2]
         pred = (
             torch.argmax(outputs["pred_code"][0], dim=1)
-            .view(-1, 7)
+            .view(-1, 8)
             .detach()
             .cpu()
             .numpy()

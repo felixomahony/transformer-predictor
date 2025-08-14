@@ -27,12 +27,17 @@ class MaskTransformer(nn.Module):
         dims=3,
         positional_embedding="rope",
         tokens_per_sample=7**3,
+        grid_shape=(7, 7, 7),
         learnable_codebook=False,
         predict_logits=False,
         normalise_embeddings=False,
         normalise_transformer_output=False,
         remove_final_two_layers=False,
         pass_through_tokens=False,
+        split_spatio_temporal=False,
+        split_spatio=False,
+        window_attention=False,
+        window_size=None,
     ):
         """Initialize the Transformer model.
         :param:
@@ -89,10 +94,13 @@ class MaskTransformer(nn.Module):
                 self.pos_emb, requires_grad=False
             )  # Changed to requires_grad=True
         elif self.positional_embedding == PositionalEmbedding.rope:
+            # then the positional embedding is done later
+            self.pos_emb = 0
+            pass
             # RoPE positional embedding
-            self.pos_emb = nn.Parameter(
-                torch.zeros(1, self.tokens_per_sample, code_dim), requires_grad=False
-            )
+            # self.pos_emb = nn.Parameter(
+            #     torch.zeros(1, self.tokens_per_sample, code_dim), requires_grad=False
+            # )
 
         # First layer before the Transformer block
         self.first_layer = nn.Sequential(
@@ -110,8 +118,13 @@ class MaskTransformer(nn.Module):
             depth=depth,
             heads=heads,
             mlp_dim=mlp_dim,
+            grid_shape=grid_shape,
             dropout=dropout,
             rope=self.positional_embedding == PositionalEmbedding.rope,
+            split_spatio_temporal=split_spatio_temporal,
+            split_spatio=split_spatio,
+            window_attention=window_attention,
+            window_size=window_size,
         )
 
         # Last layer after the Transformer block
@@ -131,14 +144,14 @@ class MaskTransformer(nn.Module):
         self.last_layer = nn.Sequential(*last_layer)
 
         # Bias for the last linear output
-        self.bias = nn.Parameter(
-            torch.zeros(
-                # (self.patch_size * self.patch_size) + 1, codebook_size + 1 + nclass + 1
-                self.tokens_per_sample,
-                codebook_size
-                + 2,  # +1 for the mask of the viz token. +1 for empty token
-            )
-        )
+        # self.bias = nn.Parameter(
+        #     torch.zeros(
+        #         # (self.patch_size * self.patch_size) + 1, codebook_size + 1 + nclass + 1
+        #         self.tokens_per_sample,
+        #         codebook_size
+        #         + 2,  # +1 for the mask of the viz token. +1 for empty token
+        #     )
+        # )
 
     def tok_emb_weight(self):
         """Return the weight of the token embedding.
@@ -169,11 +182,14 @@ class MaskTransformer(nn.Module):
             codebook_path -> str: Path to the codebook
         """
         codebook = np.load(codebook_path)
-        self.codebook = torch.from_numpy(codebook).float()
+        codebook = torch.from_numpy(codebook).float()
 
-        self.codebook = torch.nn.Parameter(
-            self.codebook, requires_grad=self.learnable_codebook
-        )
+        if self.learnable_codebook:
+            self.codebook = torch.nn.Parameter(
+                self.codebook, requires_grad=self.learnable_codebook
+            )
+        else:
+            self.register_buffer("codebook", codebook)
 
     def forward(self, img_token, return_attn=False):
         """Forward.
